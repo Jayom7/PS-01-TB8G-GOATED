@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+if [[ ! -x .venv/bin/python || ! -x node_modules/.bin/supabase || ! -x apps/web/node_modules/.bin/next ]]; then
+  echo "Missing project dependencies. Follow README setup instructions." >&2; exit 2
+fi
+if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then
+  echo "BLOCKED: Docker engine is unavailable. Start your existing Docker runtime, then rerun ./scripts/dev." >&2; exit 2
+fi
+node_modules/.bin/supabase start >/dev/null
+node_modules/.bin/supabase migration up --local
+.venv/bin/python apps/api/scripts/configure_local_web.py
+if [[ "${1:-}" == "--seed" ]]; then
+  .venv/bin/python apps/api/scripts/seed_local_demo.py
+fi
+if [[ ! -f .local-demo-credentials.json ]]; then
+  echo "Demo seed is missing. Run ./scripts/dev --seed (local synthetic data only)." >&2; exit 2
+fi
+api_pid=""; web_pid=""
+cleanup() { [[ -z "$api_pid" ]] || kill "$api_pid" 2>/dev/null || true; [[ -z "$web_pid" ]] || kill "$web_pid" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+.venv/bin/python apps/api/scripts/run_local_api.py & api_pid=$!
+(cd apps/web && ./node_modules/.bin/next dev --webpack --hostname 127.0.0.1 --port 3000) & web_pid=$!
+echo "Clearframe: http://localhost:3000 · API: http://127.0.0.1:8000"
+echo "Use the ignored local credentials file. Supabase stays running when this launcher exits."
+while kill -0 "$api_pid" 2>/dev/null && kill -0 "$web_pid" 2>/dev/null; do sleep 1; done
+exit 1

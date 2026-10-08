@@ -1,3 +1,5 @@
+import pytest
+
 from ps01_api.rag import prepare_generation_context, validate_generation
 
 
@@ -133,3 +135,28 @@ def test_model_cannot_supply_source_metadata():
         )["claims"]
         == []
     )
+
+
+@pytest.mark.parametrize(
+    "other_invoice,expected",
+    [("ACM-INV-2048", "INSUFFICIENT_EVIDENCE"), ("ACM-INV-9999", "CITATION_VALIDATED")],
+)
+def test_paid_unpaid_conflict_across_modalities_is_invoice_scoped(other_invoice, expected):
+    evidence = [
+        {
+            "chunk_id": "structured",
+            "source_type": "structured",
+            "row_id": "ACM-INV-2048",
+            "metadata": {"table": "invoices"},
+            "content": "Invoice ACM-INV-2048 is unpaid.",
+        },
+        {
+            "chunk_id": "pdf",
+            "source_type": "pdf",
+            "page_number": 1,
+            "content": f"Invoice {other_invoice} is paid.",
+        },
+    ]
+    _, canonical = prepare_generation_context("Is the invoice paid?", evidence)
+    result = validate_generation({"claims": [{"evidence_ids": ["structured:0"]}]}, canonical)
+    assert result["state"] == expected

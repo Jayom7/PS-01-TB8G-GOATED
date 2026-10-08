@@ -79,6 +79,13 @@ def _payment_statuses(value: str) -> set[str]:
     return statuses
 
 
+def _invoice_keys(row: dict[str, Any]) -> set[str]:
+    # Bounded demo contradiction check across PDF/OCR/relational representations.
+    # Normalize the explicit invoice identifier, never infer customer identity.
+    value = " ".join(str(row.get(key, "")) for key in ("content", "row_id", "source_id"))
+    return {match.casefold() for match in re.findall(r"\b(?:[A-Z0-9]+-)?INV-\d+\b", value, re.I)}
+
+
 def validate_generation(output: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
     """Resolve selected IDs to backend-owned excerpts, fail closed on forged output.
 
@@ -111,10 +118,13 @@ def validate_generation(output: dict[str, Any], evidence: list[dict[str, Any]]) 
             item
             for item in evidence
             if any(
-                item.get("row_id")
-                and item.get("row_id") == row.get("row_id")
-                and (item.get("metadata") or {}).get("table")
-                == (row.get("metadata") or {}).get("table")
+                (_invoice_keys(item) & _invoice_keys(row))
+                or (
+                    item.get("row_id")
+                    and item.get("row_id") == row.get("row_id")
+                    and (item.get("metadata") or {}).get("table")
+                    == (row.get("metadata") or {}).get("table")
+                )
                 for row in rows
             )
         ]

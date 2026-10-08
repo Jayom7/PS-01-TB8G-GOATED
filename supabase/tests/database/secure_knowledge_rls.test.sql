@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(40);
+select plan(43);
 
 select ok(
   (select count(*) = 7 and bool_and(relrowsecurity)
@@ -223,5 +223,21 @@ set local role authenticated;
 set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000006"}';
 set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000006';
 select is((select count(*) from public.knowledge_chunks),0::bigint,'Deleted document removes source chunks');
+reset role;
+insert into public.documents(id,organization_id,source_type,source_name) values
+('40000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000001','pdf','Row-scoped evidence');
+insert into public.knowledge_chunks(id,organization_id,document_id,source_type,source_name,source_id,chunk_index,content,page_number) values
+('50000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000006','pdf','Row-scoped evidence','row-scoped',0,'Authorized excerpt only',1);
+insert into public.access_grants(organization_id,chunk_id,principal_type,principal_id) values
+('10000000-0000-4000-8000-000000000001','50000000-0000-4000-8000-000000000006','user','20000000-0000-4000-8000-000000000001');
+set local role authenticated;
+set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000001"}';
+set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000001';
+select is((select count(*) from public.knowledge_chunks),1::bigint,'Chunk-only grant allows exactly its excerpt');
+select is((select count(*) from public.documents where id='40000000-0000-4000-8000-000000000006'),0::bigint,'Chunk-only grant cannot expose a full original document');
+reset role;
+delete from public.access_grants where chunk_id='50000000-0000-4000-8000-000000000006';
+set local role authenticated;
+select is((select count(*) from public.knowledge_chunks),0::bigint,'Chunk-only grant revocation takes effect');
 select * from finish();
 rollback;

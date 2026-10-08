@@ -1396,14 +1396,30 @@ async def conversation(
         if not rows:
             raise HTTPException(status_code=404, detail="Conversation not found")
         for row in rows:
-            saved = row.get("response") or {}
+            saved = row.get("response")
+            saved = saved if isinstance(saved, dict) else {}
+            claims = saved.get("claims")
+            claims = claims if isinstance(claims, list) else []
+            references = [
+                {
+                    "evidence_ids": [
+                        c.get("evidence_id")
+                        for c in claim.get("citations", [])
+                        if isinstance(c, dict)
+                    ]
+                }
+                for claim in claims
+                if isinstance(claim, dict) and isinstance(claim.get("citations"), list)
+            ]
+            citations = [
+                c
+                for claim in claims
+                if isinstance(claim, dict) and isinstance(claim.get("citations"), list)
+                for c in claim["citations"]
+                if isinstance(c, dict)
+            ]
             ids = list(
-                dict.fromkeys(
-                    c.get("citation_id")
-                    for claim in saved.get("claims", [])
-                    for c in claim.get("citations", [])
-                    if c.get("citation_id")
-                )
+                dict.fromkeys(c.get("citation_id") for c in citations if c.get("citation_id"))
             )
             try:
                 ids = [str(UUID(value)) for value in ids if isinstance(value, str)][:100]
@@ -1430,17 +1446,15 @@ async def conversation(
             _, canonical = prepare_generation_context(
                 row["query"], [{**item, "chunk_id": item["id"]} for item in current]
             )
-            references = [
-                {"evidence_ids": [c.get("evidence_id") for c in claim.get("citations", [])]}
-                for claim in saved.get("claims", [])
-            ]
             rebuilt = validate_generation({"claims": references}, canonical)
             row["response"] = {
                 "request_id": row.get("id", str(uuid4())),
                 "conversation_id": str(conversation_id),
                 "trace": {
                     key: value
-                    for key, value in saved.get("trace", {}).items()
+                    for key, value in (
+                        saved.get("trace") if isinstance(saved.get("trace"), dict) else {}
+                    ).items()
                     if key
                     in {
                         "timing_ms",

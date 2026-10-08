@@ -21,3 +21,4 @@ coverage/
 data/private/
 data/local/
 *.log
+.pnpm-store/

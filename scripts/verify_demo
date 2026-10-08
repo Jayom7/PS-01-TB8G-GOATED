@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+.venv/bin/python apps/api/scripts/verify_services.py
+node_modules/.bin/supabase test db
+.venv/bin/python apps/api/scripts/run_local_demo.py "$@"

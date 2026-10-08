@@ -233,3 +233,17 @@ def test_reopen_client_written_answer_cannot_bypass_canonical_rebuild(citations)
     assert "fabricated" not in response.text
     assert response.json()["turns"][0]["response"]["claims"] == []
     rows.assert_not_awaited()
+
+
+@pytest.mark.parametrize("saved", [None, {"claims": [None]}, {"claims": "invalid", "trace": None}])
+def test_malformed_history_content_fails_closed_without_crashing(saved):
+    with (
+        patch("ps01_api.main._identity", AsyncMock(return_value=IDENTITY)),
+        patch(
+            "ps01_api.main._history_rows",
+            AsyncMock(return_value=[{"query": "Terms?", "response": saved}]),
+        ),
+    ):
+        response = TestClient(app).get(f"/api/v1/conversations/{ID}", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["response"]["claims"] == []

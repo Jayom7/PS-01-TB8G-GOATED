@@ -5,13 +5,15 @@ review. It does not certify the system as secure.
 
 ## R-001 — RLS-aware vector retrieval
 
-- **Implemented:** nothing yet; this is an architecture decision only.
+- **Implemented:** draft invoker RPC and RLS policies in the first migration.
 - **Uncertainty:** exact Supabase/PostgreSQL request identity propagation,
   policy behavior inside vector queries, and whether policy joins preserve
-  least privilege and useful plans.
-- **Evidence:** current Supabase guidance says HNSW scans can return fewer rows
-  after selective filters and pgvector 0.8.0+ supports iterative scans; no
-  migration, SQL, database, or test is present.
+  least privilege and useful plans. Policy composition has not been reviewed
+  against a live PostgreSQL instance.
+- **Evidence:** SQL is drafted but has not been applied or tested. Current
+  Supabase guidance says HNSW scans can return fewer rows after selective
+  filters and pgvector 0.8.0+ supports iterative scans; there are no local
+  authorization tests or measurements.
 - **Deeper review:** inspect actual migrations/function privileges and test
   queries as authenticated identities, including tenant and row ACL cases.
 - **Safer temporary behavior:** deny-by-default; do not ship privileged
@@ -19,11 +21,11 @@ review. It does not certify the system as secure.
 
 ## R-002 — Filtered HNSW recall and query-plan behavior
 
-- **Implemented:** no vector index or query exists.
+- **Implemented:** draft HNSW and full-text indexes with hybrid candidate query.
 - **Uncertainty:** candidate recall under selective ACLs, installed extension
   version, iterative scan support/settings, and when exact search is needed.
-- **Evidence:** official docs describe the tradeoff; there are no local
-  measurements or query plans.
+- **Evidence:** official docs describe the tradeoff; no local migration run,
+  authorization tests, measurements, or query plans exist.
 - **Deeper review:** benchmark authorized result recall/latency and inspect
   `EXPLAIN (ANALYZE, BUFFERS)` under representative roles/selectivity.
 - **Safer temporary behavior:** do not report retrieval quality or metrics;

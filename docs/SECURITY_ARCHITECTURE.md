@@ -74,4 +74,7 @@ Before describing the prototype as enforcing retrieval-time authorization,
 tests must capture the exact objects passed to the model and assert that every
 one is authorized. Database tests must cover cross-role and cross-organization
 denials, denied metadata/source lookup, manipulated IDs/claims, and the normal
-authorized path. No such implementation or test currently exists.
+authorized path. Draft RLS policies and an invoker retrieval function now
+exist, but no database-backed authorization test or evidence-context test has
+run. The draft is not evidence that the system currently enforces these
+controls.

@@ -7,8 +7,9 @@ complete by documentation alone.
 ## 0. Foundation (current)
 
 - Architecture/security/data/API/demo contracts and repository hygiene.
+- Workspace concepts and design tokens in `docs/UI_DESIGN.md`.
 - Evidence: docs, `.gitignore`, safe `.env.example`, initial README/log.
-- Remaining: local Git commit and GitHub setup.
+- Remaining: private GitHub repository setup and origin/push.
 
 ## 1. App and database skeleton
 
@@ -16,12 +17,17 @@ complete by documentation alone.
   typed environment settings, health endpoint, and synthetic seed plan.
 - Add dependency locks, basic lint/type checks, API unit test setup.
 - Exit: clean install/build and migration application in a Docker-enabled env.
+- Web scaffold and interactive preview exist. A FastAPI health skeleton and
+  first unified-index/RLS migration are drafted; local Supabase configuration,
+  migration execution, and database tests remain outstanding.
 
 ## 2. Identity and authorization base
 
 - Supabase Auth session, profiles/roles/organizations, RLS policies, user-scoped
   API database access, role-specific demo identities.
 - Exit: database allow and deny tests for finance/HR/organization boundaries.
+  The drafted migration is not proof of authorization until tested against
+  PostgreSQL with authenticated Supabase JWTs.
 
 ## 3. Unified ingestion
 
@@ -43,9 +49,10 @@ complete by documentation alone.
 
 ## 6. Judge UI and demo
 
-- Use Superdesign to explore the new product UI before implementation; then
+- The first workspace screen is implemented from the generated concepts; then
   build responsive accessible chat, source preview, trace, demo identity switch,
-  and measured evaluation view against real API state.
+  and measured evaluation view against real API state. A generated concept set
+  now exists; the Superdesign CLI was unavailable during preflight.
 - Exit: allowed and denied live demo flows with keyboard-friendly controls.
 
 ## 7. Evaluation and review

@@ -1,45 +1,51 @@
-# Implementation Plan
+# Implementation Plan and Current Checkpoint
 
-Build the vertical slice on the existing Next.js, FastAPI, and Supabase
-foundation. Do not replace the architecture.
+This is the existing Next.js + FastAPI + Supabase implementation. Do not
+re-scaffold it. This checkpoint describes repository state on 2026-10-08;
+historical test evidence is called out separately in `REVIEW_NEEDED.md`.
 
-## Current checkpoint
+## Implemented in the repository
 
-- Next.js sign-in and server-side route gate use Supabase Auth.
-- FastAPI query and citation routes validate the session and use the same user
-  token for database requests.
-- Gemini Embedding 2 and structured Gemini Flash adapters are implemented.
-- Claim validation binds each citation to the bounded evidence objects passed
-  to generation; unsupported citations fail closed.
-- Six focused RAG unit tests pass. Web lint and production build pass.
-- The database migration remains unapplied. Live Supabase/Gemini checks failed
-  at DNS resolution, and the Python runtime dependencies could not be
-  installed because package download DNS failed.
+- Six authenticated pages and Supabase Auth route protection.
+- User-session retrieval/source lookup, local CEO-brokered demo contexts, and
+  local CEO-gated ingestion.
+- Hybrid PostgreSQL vector/full-text retrieval, PDF/OCR/structured ingestion,
+  citation/source provenance, and a synthetic evaluation runner.
+- Configurable Gemini REST adapters and bounded query context.
+- Five demo roles: CEO, Finance Manager, HR Manager, Sales Manager, Engineer.
+- Safe provider errors, configurable model fallback, and citation membership
+  checking. The current pass adds quote-integrity/lexical checks.
 
-## Remaining phases
+## Current blockers
 
-1. **Database and authorization:** install/use Supabase CLI and Docker; validate
-   the current migration, add the required business schema and synthetic
-   records, apply it only after validation, then run database-backed allow and
-   deny tests.
-2. **Ingestion:** implement page-aware PDF extraction, OCR for images with
-   provenance, structured row normalization, private source preservation, and
-   an explicitly authorized transactional write path.
-3. **Demo identity:** create CEO, Finance, HR, Sales, and Engineer Supabase
-   users and switch between actual sessions in demo-only mode.
-4. **Complete product surfaces:** connect Overview, Knowledge, Ingestion,
-   Security, and Evaluation to real API/database state; do not fabricate
-   metrics or seed results as live data.
-5. **End-to-end proof:** run the four Acme query flows, finance allow, HR deny,
-   prompt attack denial, citation lookup, and exact model-context tests against
-   the applied database and real providers.
-6. **Delivery:** repeat dependency install, backend tests, frontend lint and
-   typecheck/build, migration checks, update this file and
-   `REVIEW_NEEDED.md`, then set up GitHub after `gh` is installed and
-   authenticated.
+- Docker client exists, but this session cannot access the Docker API socket:
+  `permission denied ... unix:///Users/Jayom/.docker/run/docker.sock`.
+- Repo-local Supabase CLI executable is absent/broken despite a dependency
+  declaration; `node_modules/.bin/supabase` does not resolve. The local database
+  and clean end-to-end demo cannot be started here. Do not switch to a remote
+  database as fallback.
+- Gemini API quota/access was previously observed returning HTTP 429. This
+  session did not spend another live provider request.
+- Hosted Supabase CLI auth and hosted policy state remain unverified.
 
-## Deferred review
+## Remaining order
 
-Filtered HNSW recall, security-definer concerns, role/tenant edge cases, and
-performance/concurrency review remain documented in `REVIEW_NEEDED.md` for the
-stronger security pass.
+1. Restore Docker socket access, install the repository-pinned JavaScript
+   dependencies from the lockfile, verify local Supabase CLI, start local
+   Supabase, run the seed command, and start the API/web using the documented
+   commands in `README.md`.
+2. Run the complete API suite, Ruff, web lint/typecheck/build, and browser checks
+   across the six routes, roles, and responsive breakpoints.
+3. Once provider quota/access is restored, verify one allowed finance answer,
+   exact citation/source preview, and HR insufficient-evidence result. Avoid
+   repeated retries when 429 persists.
+4. Repeat local pgTAP/schema checks only after the local database starts. Hosted
+   state requires its own separately authorized credentials and review.
+5. Address the deeper items in `REVIEW_NEEDED.md`: hosted RLS review, filtered
+   HNSW benchmarks/query plans, semantic entailment methodology, provider
+   resilience, and production ingestion/storage review.
+
+## Scope boundary
+
+The product is a local hackathon demo slice, not production-ready. Do not
+weaken authorization or replace the stack to bypass unavailable infrastructure.

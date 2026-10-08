@@ -17,21 +17,23 @@ requester's identity attached to retrieval.
 - CEO-only local ingestion accepts PDFs, images, and structured JSON, creates
   Gemini embeddings, and persists documents/chunks and role grants. Original
   uploads are stored privately under ignored `data/private/ingest/`.
-- Citation responses are checked for membership in model context and source
-  provenance. This validates citation membership and provenance, not semantic
-  claim support. Empty evidence returns `INSUFFICIENT_EVIDENCE`.
+- Citation responses check model-context membership, exact supporting excerpts,
+  coarse lexical overlap, and source provenance. These bounded deterministic
+  checks do not prove semantic claim entailment. Empty evidence returns
+  `INSUFFICIENT_EVIDENCE`.
 - Evaluation runs the local retrieval cases and reports recall, rank,
   authorization violations, citation provenance, OCR, structured, cross-modal,
   and latency results. Results are saved locally and exposed to authenticated
   workspace users.
 
-The local migration set is applied to the local Supabase stack. The hosted
-project is not linked or verified in this checkout. Gemini 3.8 Flash is the
-primary generation model, with 3.6 Flash as fallback. A browser invoice query
-and OCR citation succeeded during the latest pass; other live requests also
-hit timeouts or malformed provider output, so answer availability is not yet
-consistent. Citation validation verifies retrieved source membership and
-location, not semantic entailment of each claim.
+The configured generation path is Gemini 3.8 Flash primary and Gemini 3.7 Flash
+fallback; Embedding 2 uses 1536 dimensions. Model IDs remain configurable.
+HTTP 429 stops after one request rather than spending a fallback request.
+Previous local migration, pgTAP, browser, and evaluation results are
+historical; see `docs/REVIEW_NEEDED.md`. In this session Docker is installed but
+the API socket returns permission denied, and the repo-local Supabase CLI
+executable is absent. Hosted Supabase remains unverified. Earlier real Gemini
+queries returned 429, and no fresh answer has been verified in this pass.
 
 ## Local setup
 
@@ -41,7 +43,23 @@ contains only the public Supabase URL/key and API base URL. Both local files
 are ignored by Git. Never place `GEMINI_API_KEY` or `SUPABASE_SECRET_KEY` in a
 `NEXT_PUBLIC_` variable or the web env file.
 
-Start Docker Desktop, then start local Supabase and seed the demo users/data:
+First ensure Docker Desktop is running and accessible, and install the
+repo-pinned dependencies from both lockfiles:
+
+```sh
+npm ci
+pnpm --dir apps/web install --frozen-lockfile
+```
+
+Create the local API environment once if needed and install the optional
+ingestion dependencies:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e 'apps/api[ingestion]'
+```
+
+Then start local Supabase and seed the demo users/data:
 
 ```sh
 PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./node_modules/.bin/supabase start
@@ -61,8 +79,9 @@ and binds to `127.0.0.1`. Install optional PDF/OCR dependencies with
 setup documented in [API setup](apps/api/README.md).
 
 Demo account passwords are generated on first seed and stored only in the
-ignored, owner-readable `.local-demo-credentials.json` file. Do not copy this
-file into Git or use these local identities for a hosted project. The role
+ignored, owner-readable `.local-demo-credentials.json` file. Read that file
+locally when preparing the demo; do not paste its contents into chat or Git.
+Do not use these local identities for a hosted project. The role
 switcher exchanges the signed-in local account for one of those real Auth
 sessions; it does not edit a client-side role label.
 

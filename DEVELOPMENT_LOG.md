@@ -79,6 +79,37 @@
   applying the migration there. The local project migration and 17 pgTAP tests
   pass; the hosted schema remains unverified.
 
+## 2026-10-08 — Current local build and presentation handoff
+
+- Re-audited the working tree, implementation, test suite, current docs, and
+  local runtime prerequisites before continuing. Earlier log entries are
+  historical snapshots, not assertions about the runtime in this session.
+- The current Docker client cannot access
+  `/Users/Jayom/.docker/run/docker.sock` (permission denied); the root
+  `node_modules/.bin/supabase` link has no package target. Therefore this pass
+  did not start the local database, API, or authenticated web demo. Hosted
+  endpoints were not substituted.
+- Gemini model settings remain configurable: 3.8 Flash primary, 3.7 Flash
+  fallback, Embedding 2 at 1536 dimensions. The code now stops on generation
+  HTTP 429 after one request, returns a rate-limit-specific code/message, and
+  the Ask page offers a retry action. No new live provider request was made.
+- Security status and traces no longer return/display an unmeasured zero for
+  unauthorized evidence. Gemini dashboard state means configured, not live
+  availability. RLS status now explicitly says that endpoint did not check it.
+- Claim output now requires a supporting quote per citation. Deterministic
+  validation checks quote inclusion and coarse lexical overlap in addition to
+  membership/location; tests cover absent/incorrect and unrelated quotes. This
+  is not semantic entailment proof.
+- PNG/JPEG header dimensions are checked before OCR and constrained to 16M
+  pixels. Ingest UI now reports one real indexing state instead of implying
+  per-stage progress.
+- Updated current architecture, security, API, data model, implementation,
+  decisions, review, and demo docs. Added judge and screen-recording scripts.
+- Verification of this modified tree: 40 API tests passed; Ruff passed; web
+  ESLint passed; direct project TypeScript check passed; Next.js production
+  build passed. No browser auth, live data, Supabase migration, OCR engine, or
+  Gemini generation check was performed in this pass.
+
 ## 2026-10-08 — Authenticated query slice
 
 - Added Supabase password sign-in, a server-side `getClaims()` route gate, and

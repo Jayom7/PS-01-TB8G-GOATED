@@ -1,82 +1,53 @@
 # Security Architecture
 
-## Assets and trust boundaries
+## Implemented boundaries
 
-Assets include source documents and rows, names and metadata, embeddings,
-authorization policies, user identity, prompt context, citations, audit data,
-and provider credentials. Trust boundaries are the browser/API boundary, the
-API/database boundary, normal-user versus administrative database access, and
-the API/provider boundary. Uploaded documents and model output are untrusted.
+- Supabase Auth supplies identity. The API validates the bearer token before
+  protected workspace/query operations. Request bodies reject caller-supplied
+  user, role, organization, ACL, or evidence fields.
+- Normal query retrieval and source preview use the validated session with the
+  database invoker RPC / RLS path; they do not use `SUPABASE_SECRET_KEY`.
+- The CEO-only local demo switch broker resolves one of the five seeded role
+  users server-side. The browser's signed-in identity remains separate from the
+  active demo authorization context. The local feature is gated to loopback
+  Supabase and the ignored credential file; it must not be enabled against a
+  hosted project.
+- Local CEO-gated ingestion is a separate server-side write path and uses a
+  privileged key. It stores originals in private local storage.
+- Retrieved evidence is bounded before generation. The model prompt treats
+  evidence as untrusted data. Citation IDs and source locations are rebuilt
+  from the retrieved context. Current claim validation additionally checks
+  supplied exact excerpts and lexical overlap, but cannot establish semantic
+  entailment.
 
-## Identity and policy
+## Evidence and status semantics
 
-Supabase Auth is the identity provider. FastAPI asks the Auth user endpoint to
-validate the bearer session before using it. User ID, organization membership,
-roles, and grants must come from the validated session and database records,
-never from request fields. The current query route does not accept identity or
-role fields. Demo role switching must select a real seeded demo identity/session
-rather than overwrite a role label in client state.
+The code can assert that a query sends only the exact bounded result from the
+authorized retrieval RPC; API tests capture that prompt context. The endpoint
+does not independently measure a count of unauthorized evidence supplied to
+the model, so Security and per-query traces must not display a numeric zero.
+Local RLS/pgTAP results recorded in `REVIEW_NEEDED.md` establish only the state
+tested at that earlier local run. The current local Docker API is inaccessible,
+and hosted Supabase policy state has not been verified. Do not label either
+state as currently verified.
 
-Authorization is default-deny and combines organization boundary, subject or
-role grant, resource/source ACL, and classification. Document grants may flow
-to derived chunks only through explicit, auditable inheritance. Structured
-records carry row-level access policy. An explicit chunk override is allowed
-only where a source requires finer restrictions.
+The Security screen describes the architecture and displays recent in-process
+retrieval events; it is not a live policy auditor, hosted RLS probe, production
+security certification, or security score. Events clear when the API process
+restarts. The Dashboard's Gemini value means configured/not configured only;
+availability is not probed by that request.
 
-## Retrieval boundary
+## Preserve these invariants
 
-All query and source-preview operations run under the requesting user's
-database identity. Authorization predicates execute within the database
-retrieval operation. The ordinary path cannot query broadly with an elevated
-credential and then filter in the API. RLS is defense in depth and the
-database tests must prove both authorized retrieval and absence of denied
-rows in the exact evidence context passed to generation.
+1. The client cannot promote itself to CEO or forge a user/organization.
+2. Normal retrieval never uses an elevated Supabase key.
+3. Unauthorized evidence must not enter the exact model context.
+4. Source preview repeats authorization under the current session.
+5. Local role brokering and privileged ingestion remain local-only.
+6. Provider output and uploaded content remain untrusted.
 
-An ingestion path is not implemented. Any future privileged path must be
-separate, server-only, and narrowly authorized for its write duties. Any future
-privileged database function requires a narrow contract, non-exposed schema
-where possible, pinned empty `search_path`, fully qualified objects, explicit
-execute grants, and dedicated abuse tests. Avoid security-definer functions
-unless the measured design requires one.
-
-## Metadata and side-channel handling
-
-Unauthorized resources must be indistinguishable from absent resources in
-query responses, source lookup, citation resolution, counts, debug output, and
-error shape. Search candidate counts are computed only over the authorized
-result set. Logs and user-visible traces may report safe stages and authorized
-counts only; they never contain denied names, IDs, snippets, embeddings, or
-raw document contents. Sensitive source preview requires the same policy check
-as retrieval.
-
-## Generation and citation controls
-
-Only the exact bounded retrieval response is sent to the model; database
-authorization for that response remains unverified until RLS tests pass.
-Document text is treated as untrusted data, not instructions. Model-generated
-IDs are merely proposals. The current deterministic validator checks ID
-membership and source-location shape; it does not verify that a cited passage
-entails the claim. The API reports citation validation accordingly. Semantic
-claim support, provider failure behavior, and prompt-injection resistance still
-need explicit tests. No context expansion or automatic retry occurs.
-
-## Secrets and operational controls
-
-Secrets are read at runtime from environment/secret storage. Gemini and
-`SUPABASE_SECRET_KEY` remain server-side; the browser receives only the public
-Supabase URL and publishable key. The current user-query and source-lookup paths
-do not use the secret key. Do not log tokens, secrets, raw prompts, or
-protected source text. Upload validation, file-size/type limits, rate limits,
-request IDs, and bounded provider timeouts remain requirements for the
-unimplemented ingestion path.
-
-## Verification gate
-
-Before describing the prototype as enforcing retrieval-time authorization,
-tests must capture the exact objects passed to the model and assert that every
-one is authorized. Six local unit tests cover bounded model context and
-citation filtering, but they do not exercise PostgreSQL or Supabase RLS.
-Database tests must cover cross-role and cross-organization denials, denied
-metadata/source lookup, manipulated IDs/claims, and the normal authorized path.
-The draft migration has not been applied; it is not evidence that the system
-currently enforces these controls.
+Changes to the RLS RPC, grants, role broker, service key boundaries, document
+grant inheritance, or evidence-context construction require a focused security
+review and database-backed authorization tests. Hosted security, representative
+filtered-HNSW recall, semantic support, and production controls are open items
+in `REVIEW_NEEDED.md`.

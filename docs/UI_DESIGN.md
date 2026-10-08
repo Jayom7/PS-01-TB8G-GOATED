@@ -27,11 +27,21 @@ as a screenshot.
   role switching, theme selection, and Log out.
 - The Ask route shows inline citations and opens authorized source excerpts in
   a responsive evidence drawer.
-- A coherent light/dark token set, focus states, mobile navigation, table
-  overflow, and reduced-motion behavior are implemented. Production browser
-  checks covered 320px mobile and 1440px desktop; tablet and broader device
-  coverage remain unverified.
-- The interface reports live data and safe request failures. Gemini generation
-  was intermittent during the latest browser run; see `REVIEW_NEEDED.md`.
+- Dashboard, Ask, Sources, Ingest, Security, and Evaluation are real API-backed
+  views behind the authenticated workspace. Sources supports authorized text
+  search and source-type filters; rows show date, type, and available chunk
+  count.
+- Light/dark colors now resolve through a shared token set in
+  `apps/web/src/app/globals.css`. The themes use neutral surfaces, shared text,
+  border, accent, focus, status, overlay, and shadow tokens. Routes share a
+  full-height sidebar and independently scrolling main column; mobile nav and
+  the source drawer have narrow-screen layouts.
+- CSS and production build pass in the current pass. Prior browser checks
+  covered desktop/tablet/mobile and theme states; they are historical and were
+  not repeated because local Supabase is currently inaccessible. See
+  `REVIEW_NEEDED.md` for exact current verification boundaries.
+- Gemini errors are readable and retryable; quota availability remains
+  unverified. Security/Evaluation labels distinguish architecture and local
+  smoke measurements from hosted or production proof.
 
 The controlled local demo identity switch uses real seeded Supabase sessions.

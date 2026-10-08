@@ -177,8 +177,19 @@ async def generate_claims(
                                     "type": "ARRAY",
                                     "items": {"type": "STRING"},
                                 },
+                                "supporting_quotes": {
+                                    "type": "ARRAY",
+                                    "items": {
+                                        "type": "OBJECT",
+                                        "properties": {
+                                            "citation_id": {"type": "STRING"},
+                                            "quote": {"type": "STRING"},
+                                        },
+                                        "required": ["citation_id", "quote"],
+                                    },
+                                },
                             },
-                            "required": ["text", "citation_ids"],
+                            "required": ["text", "citation_ids", "supporting_quotes"],
                         },
                     }
                 },
@@ -214,7 +225,7 @@ async def generate_claims(
             if model_index + 1 < len(models):
                 continue
             raise last_failure from exc
-        if response.status_code in {429, 500, 502, 503, 504} and model_index + 1 < len(models):
+        if response.status_code in {500, 502, 503, 504} and model_index + 1 < len(models):
             continue
         break
     if response is None:
@@ -222,7 +233,13 @@ async def generate_claims(
             "Gemini generation failed", code="provider_unavailable"
         )
     if response.is_error:
-        code = "provider_timeout" if response.status_code == 504 else "provider_unavailable"
+        code = (
+            "provider_rate_limited"
+            if response.status_code == 429
+            else "provider_timeout"
+            if response.status_code == 504
+            else "provider_unavailable"
+        )
         raise IntegrationFailure(
             f"Gemini generation is temporarily unavailable (HTTP {response.status_code})",
             code=code,

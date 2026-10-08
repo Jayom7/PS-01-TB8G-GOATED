@@ -13,6 +13,7 @@ MAX_PDF_PAGES = 100
 MAX_OCR_REGIONS = 1_000
 MAX_CHUNK_CHARS = 1_200
 MAX_PAGE_PIXELS = 16_000_000
+MAX_IMAGE_PIXELS = 16_000_000
 
 
 class IngestionError(ValueError):
@@ -152,6 +153,9 @@ def extract_image_ocr(
         raise IngestionError("Source does not have a JPEG signature")
     if not source_id.strip():
         raise IngestionError("Image source ID is required")
+    width, height = _image_dimensions(path)
+    if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+        raise IngestionError(f"Image dimensions must not exceed {MAX_IMAGE_PIXELS:,} pixels")
     if engine is None:
         engine = _create_ocr_engine()
 
@@ -166,6 +170,67 @@ def extract_image_ocr(
         source_id=source_id,
         image_id=source_id,
     )
+
+
+def _image_dimensions(path: Path) -> tuple[int, int]:
+    """Read raster dimensions from headers without decoding image pixels."""
+    try:
+        with path.open("rb") as source_file:
+            signature = source_file.read(8)
+            if signature == b"\x89PNG\r\n\x1a\n":
+                source_file.seek(16)
+                dimensions = source_file.read(8)
+                if len(dimensions) == 8:
+                    return int.from_bytes(dimensions[:4], "big"), int.from_bytes(
+                        dimensions[4:], "big"
+                    )
+                raise IngestionError("PNG dimensions are missing")
+
+            if signature[:2] != b"\xff\xd8":
+                raise IngestionError("Source is not a supported PNG or JPEG")
+            source_file.seek(2)
+
+            while marker := source_file.read(1):
+                if marker != b"\xff":
+                    continue
+                while (marker := source_file.read(1)) == b"\xff":
+                    pass
+                if not marker:
+                    break
+                code = marker[0]
+                if code in {0xD8, 0xD9} or 0xD0 <= code <= 0xD7 or code == 0x01:
+                    continue
+                segment_length_bytes = source_file.read(2)
+                if len(segment_length_bytes) != 2:
+                    break
+                segment_length = int.from_bytes(segment_length_bytes, "big")
+                if segment_length < 2:
+                    break
+                if code in {
+                    0xC0,
+                    0xC1,
+                    0xC2,
+                    0xC3,
+                    0xC5,
+                    0xC6,
+                    0xC7,
+                    0xC9,
+                    0xCA,
+                    0xCB,
+                    0xCD,
+                    0xCE,
+                    0xCF,
+                }:
+                    dimensions = source_file.read(5)
+                    if len(dimensions) == 5:
+                        height = int.from_bytes(dimensions[1:3], "big")
+                        width = int.from_bytes(dimensions[3:5], "big")
+                        return width, height
+                    break
+                source_file.seek(segment_length - 2, 1)
+    except OSError as exc:
+        raise IngestionError("Image dimensions could not be read") from exc
+    raise IngestionError("Image dimensions are missing or malformed")
 
 
 def _ocr_candidates(

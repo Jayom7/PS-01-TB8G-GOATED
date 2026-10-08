@@ -1,32 +1,34 @@
 # Architecture Decisions
 
-Status terms: **proposed** means a planned choice awaiting implementation and
-verification; **accepted** means implemented and reviewed. All entries below
-are proposed as of 2026-10-08.
+This file retains the design rationale from the initial scaffold. The choices
+below are now implemented in the repository; that does not imply that hosted
+deployment or production readiness is verified. Current proof limits are in
+`REVIEW_NEEDED.md`.
 
 ## D-001 — One unified chunk index
 
-**Decision:** PDF, OCR, and structured evidence share a `knowledge_chunks`
-model and `SecureRetriever` contract.
+**Decision:** PDF, OCR, and structured evidence share `knowledge_chunks` and
+the `match_knowledge_chunks` RPC.
 
-**Reason:** cross-modal retrieval and authorization need one query boundary,
-provenance vocabulary, and evidence set before generation.
+**Status:** migration and ingestion adapters implement this model; local
+database evidence is historical and hosted operation is unverified.
 
 ## D-002 — Database-enforced user retrieval
 
 **Decision:** ordinary queries use a user-scoped database identity and RLS;
-the service-role credential is reserved for separate server-side admin tasks.
+the secret key is reserved for the separate local CEO-gated ingestion writer.
 
 **Reason:** filtering in the API after privileged retrieval does not satisfy
-the requirement. Exact implementation remains subject to RLS tests.
+the requirement. The RPC is invoker-security; local RLS results are recorded
+separately from hosted verification.
 
 ## D-003 — PostgreSQL with pgvector and full text
 
 **Decision:** Supabase PostgreSQL is the initial persistence and unified
 retrieval store, with pgvector cosine search and PostgreSQL full-text search.
 
-**Reason:** one relational transaction and policy boundary can cover source
-rows, ACLs, metadata, and embeddings. This is a target, not a benchmark result.
+**Reason:** one relational transaction and policy boundary covers source
+metadata, grants, and embeddings in this demo; this is not a scale benchmark.
 
 ## D-004 — HNSW is a measured starting point
 
@@ -39,23 +41,21 @@ See [Supabase HNSW guidance](https://supabase.com/docs/guides/ai/vector-indexes/
 
 ## D-005 — Configurable Gemini defaults
 
-**Decision:** start with Gemini Embedding 2 at 1536 dimensions and Gemini 3.8
-Flash for generation; inject provider/model through configuration and
-interfaces.
+**Decision:** use configurable Gemini Embedding 2 at 1536 dimensions, Gemini
+3.8 Flash primary, and Gemini 3.7 Flash fallback for generation.
 
-**Reason:** current official Google docs list these stable model IDs and
-recommend 1536 as an embedding size. Check project access, limits, SDK, and
-quality during integration; neither provider choice is embedded in domain
-contracts. See [Gemini models](https://ai.google.dev/gemini-api/docs/models)
+**Reason:** these settings are configurable and supported by the adapters.
+Project quota/access is currently unverified; HTTP 429 does not trigger another
+model request. See [Gemini models](https://ai.google.dev/gemini-api/docs/models)
 and [Gemini embeddings](https://ai.google.dev/gemini-api/docs/embeddings).
 
 ## D-006 — Local OCR/PDF adapters
 
-**Decision:** use a local OCR adapter (PaddleOCR candidate) and PyMuPDF
-candidate, preserving originals and precise source coordinates.
+**Decision:** use PyMuPDF and PaddleOCR adapters with page/region provenance,
+preserving originals under private local storage.
 
-**Reason:** source-level control and demo reproducibility. Select concrete
-versions after checking platform support and installation constraints.
+**Reason:** source-level control and reproducible local ingestion; hosted
+storage and write-path review remains open.
 
 ## D-007 — No LangChain core
 

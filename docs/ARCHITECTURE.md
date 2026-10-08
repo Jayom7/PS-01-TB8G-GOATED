@@ -1,96 +1,74 @@
 # Architecture
 
-## Product boundary
+## Current implementation (2026-10-08)
 
-PS-01 is a competition prototype for answering questions over synthetic
-enterprise material. It combines PDFs, images processed with OCR, and
-structured business records. One retrieval abstraction and one canonical
-chunk table serve every source type. This is a design target; no services are
-implemented yet.
-
-## Runtime components
+Clearframe is a local demo built from Next.js 16, FastAPI, Supabase Auth/Postgres,
+and Gemini REST adapters. The schema is in `supabase/migrations`; it contains
+organizations, profiles, roles, user-role assignments, documents, chunks, and
+access grants. HNSW plus PostgreSQL full-text search feed the authorized hybrid
+retrieval RPC. This stack is implemented; today's local Supabase runtime is not
+reachable from this checkout (see `REVIEW_NEEDED.md`).
 
 ```text
-Browser (Next.js) ── Supabase Auth session ──> FastAPI
-                                                │
-                     user JWT scoped request ───┼──> Supabase Postgres
-                                                │      RLS + unified RPC/query
-                                                ├──> Gemini embedding adapter
-                                                └──> Gemini generation adapter
-
-Admin ingestion job ── restricted credential ───────> source storage + chunks
+Browser ── Supabase Auth session ──> FastAPI
+                                      ├── user/brokered role session ──> RLS + retrieval RPC
+                                      ├── Gemini Embedding 2
+                                      └── Gemini Flash generation
+CEO-gated local ingestion ── server-only secret ──> documents/chunks/role grants
 ```
 
-The browser handles presentation and session UX. FastAPI validates the bearer
-token and constructs a user-scoped database client for query and source access.
-The database is the authorization boundary for retrieval. A distinct,
-server-only administrative ingestion path may use elevated credentials to
-write data; it is not reachable from the ordinary query path.
+The ordinary query and citation lookup paths forward the verified user's
+bearer token to Supabase. They do not use the secret key. Local CEO demo-role
+switching is a server broker that exchanges the signed-in local CEO for a
+separate seeded role session; it does not make a client role label
+authoritative. The signed-in identity and active authorization context are
+separate values. The local ingestion path uses the server-only secret for
+writes and is explicitly restricted to local demo setup.
 
-## Unified retrieval model
+## Query and evidence flow
 
-PDF pages, OCR regions, and structured rows normalize into `KnowledgeUnit`s,
-then into `knowledge_chunks`. Each item has a common ID, source type, source
-identity, provenance/location, tenant, classification, ACL relationship,
-text representation, metadata, and embedding. One `SecureRetriever` issues
-authorized semantic and keyword searches across all types, fuses authorized
-results, and returns a typed evidence set. Cross-modal results are a supported
-contract, not separate query systems merged after retrieval.
+1. FastAPI validates the Supabase session and resolves the active role context.
+2. Gemini Embedding 2 embeds the query (1536 dimensions by default).
+3. Supabase's invoker RPC applies row authorization while returning hybrid
+   ranked chunks; Python does not retrieve broad privileged evidence and filter
+   it afterward.
+4. `prepare_generation_context` bounds evidence to 32,000 characters and sends
+   only the RPC result to Gemini.
+5. Gemini returns claims, citation IDs, and exact supporting excerpts. The
+   deterministic validator checks citation membership, exact excerpt presence,
+   coarse lexical overlap, and citation locations. This is not semantic
+   entailment verification.
+6. The response contains server-built citations. A source preview repeats an
+   authorized lookup using the active user/session.
 
-Source-specific original assets remain in object storage; chunks retain stable
-references and exact page, row, or OCR-region coordinates. Structured values
-are rendered into deterministic searchable text while preserving typed row
-fields and primary-key provenance.
+Retrieval and database ranking share one timing value; the RPC does not expose
+a ranking-only duration. No dedicated reranker or duplicate retrieval call is
+used. Generation is configurable through environment settings: Gemini 3.8
+Flash primary, Gemini 3.7 Flash fallback, Gemini Embedding 2 at 1536 dimensions.
+Fallback is limited to transient transport/timeouts and 5xx; 429 stops after one
+request. Provider availability depends on current project quota/access.
 
-## Application boundaries
+## Ingestion and UI
 
-- `apps/web`: Next.js/TypeScript UI, auth session, chat, source preview,
-  security trace, ingestion status, and evaluation screens.
-- `apps/api`: FastAPI routes, Pydantic contracts, token validation, query
-  orchestration, ingestion adapters, provider adapters, and audit events.
-- `packages/shared`: API shapes and source/citation vocabulary only where
-  sharing prevents drift; Python domain types remain authoritative for API.
-- `supabase/migrations`: schema, RLS, vector/full-text indexes, and retrieval
-  functions; `supabase/tests`: database authorization tests.
-- `data/demo`: synthetic PDF/image/structured fixtures; never private data.
+PDF text and scanned-page OCR, PNG/JPEG OCR, and structured records normalize
+to `knowledge_chunks` with page/region/row provenance. Local PDF/OCR/record
+flows and source preview were recorded as working in the previous runtime
+session. Image ingestion checks file signature and header dimensions before OCR
+and caps raster area at 16 million pixels. Original uploads are kept in the
+ignored local private-data directory. There is no background job queue or
+server-reported per-stage progress.
 
-## Model and index starting choices
+The six direct routes are Dashboard, Ask, Sources, Ingest, Security, and
+Evaluation. Dashboard and Security API data are session-scoped; Evaluation is
+the synthetic local suite. The UI supports light/dark theme and responsive
+navigation. Current browser rendering is not reverified in this resumed pass.
 
-Use `gemini-embedding-2` with output dimension 1536 as a configurable baseline;
-Google currently lists the model as stable and recommends 768/1536/3072 output
-dimensions. Use `gemini-3.8-flash` as the configurable stable chat model. Verify
-account availability, quota, SDK behavior, and exact output shape during
-integration. PostgreSQL uses pgvector cosine distance and HNSW initially, plus
-`tsvector` full-text retrieval. These choices must be revisited against the
-representative evaluation set and query plans.
+## Proof boundaries
 
-## Critical request sequence
-
-1. Validate the Supabase-issued JWT and derive the subject from its verified
-   claims; ignore client-supplied role, user, organization, or ACL claims.
-2. Embed the query through a provider adapter.
-3. Search semantic and lexical candidates through a database operation whose
-   effective identity is the authenticated user and whose RLS/ACL predicates
-   are part of that operation.
-4. Fuse and bound only authorized results. Do not fetch protected candidates
-   into Python and filter them afterward.
-5. Build an immutable context from the authorized evidence set and retain the
-   exact evidence IDs passed to the generator.
-6. Generate typed claims and candidate source IDs; validate every source ID,
-   evidence membership, authorization, and location against the context.
-7. Return validated citations or a controlled insufficient-evidence response.
-
-## Deployment shape
-
-Remain provider-agnostic for the API and database while developing locally.
-The frontend may deploy to Vercel; the API can later use Cloud Run or an
-equivalent container host. No deployment architecture is implemented or
-validated yet.
-
-## Constraints
-
-- RLS and filtering must cover rows and metadata, not just answer text.
-- No normal query path may use a service-role credential.
-- No generated factual claim may survive without validated evidence.
-- Ingestion and query credentials, roles, and code paths are separate.
-- Evaluation results are measured outputs; no seeded or hand-authored metrics.
+Earlier local migration and pgTAP results are recorded in `REVIEW_NEEDED.md`
+and `FINAL_LUNA6_FUNCTIONALITY_REPORT.md`; they are not a live check of the
+current runtime or hosted project. Hosted policies, representative-scale
+retrieval recall/query plans, production ingestion, concurrency, and semantic
+claim entailment remain unverified. Preserve those boundaries when changing
+database authorization, session brokering, storage, or the exact evidence
+context passed to the model.

@@ -118,3 +118,23 @@ async def test_generation_reports_provider_outage_after_trying_configured_fallba
             await generate_claims(client, config, "Generate a grounded answer.")
 
     assert failure.value.code == "provider_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_generation_does_not_spend_fallback_request_on_rate_limit() -> None:
+    from ps01_api.integrations import IntegrationFailure
+
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(429)
+
+    config = settings()
+    config.gemini_fallback_chat_model = "gemini-3.7-flash"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, config, "Generate an answer.")
+
+    assert failure.value.code == "provider_rate_limited"
+    assert len(calls) == 1

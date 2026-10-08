@@ -22,7 +22,6 @@ type QueryResult = {
     session_verified: boolean;
     database_request_used_user_session: boolean;
     evidence_items_sent_to_model: number;
-    unauthorized_evidence_sent_to_model: number;
     generation_model: string | null;
     fallback_used: boolean;
     active_role: string;
@@ -88,7 +87,6 @@ type SecurityData = {
     state: string;
     active_role: string;
     authorized_evidence_count: number;
-    unauthorized_evidence_count: number;
     decision: string;
   }[];
   security_tests: Record<string, string | number>;
@@ -135,6 +133,7 @@ async function readResponse<T>(response: Response): Promise<T> {
     const code = typeof body?.code === "string" ? body.code : "";
     const messages: Record<string, string> = {
       provider_unavailable: "The AI service is unavailable right now. Your question was not answered.",
+      provider_rate_limited: "Answer generation is temporarily unavailable because the AI service is rate-limited. Your retrieved evidence remains protected; please retry later.",
       provider_timeout: "The AI service took too long to respond. Please try again.",
       provider_invalid_response: "The AI service returned an unusable answer. Please retry.",
       retrieval_unavailable: "Authorized search could not complete. No answer was generated.",
@@ -200,6 +199,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [accountOpen, setAccountOpen] = useState(false);
   const theme = useSyncExternalStore(subscribeTheme, readTheme, () => "light");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState("all");
   const [structuredJson, setStructuredJson] = useState('{\n  "invoice_id": "INV-2048",\n  "status": "unpaid"\n}');
   const [structuredMeta, setStructuredMeta] = useState({ table: "invoices", rowId: "INV-2048", sourceName: "Invoice record", accessRole: "CEO" });
   const [ingestFile, setIngestFile] = useState<File | null>(null);
@@ -259,8 +259,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     if (sourceCloseTimer.current !== null) window.clearTimeout(sourceCloseTimer.current);
   }, []);
 
-  async function ask(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function ask(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
     const question = query.trim();
     if (!question || pending) return;
     setPending(true);
@@ -508,7 +508,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const role = activeRole || workspace?.active_role || workspace?.identity.role || "Loading";
   const userName = workspace?.identity.display_name ?? identity;
   const filteredSources = (sources ?? []).filter((source) =>
-    `${source.source_name} ${source.source_type} ${source.id}`.toLocaleLowerCase().includes(sourceFilter.trim().toLocaleLowerCase()),
+    (sourceTypeFilter === "all" || source.source_type === sourceTypeFilter)
+      && `${source.source_name} ${source.source_type} ${source.id}`.toLocaleLowerCase().includes(sourceFilter.trim().toLocaleLowerCase()),
   );
 
   function setSelectedTheme(next: "light" | "dark") {
@@ -571,12 +572,13 @@ export default function Workspace({ identity, view }: { identity: string; view: 
               pending={pending}
               error={error}
               onSubmit={ask}
+              onRetry={() => void ask()}
               onSource={openSource}
             />
           ) : view === "Dashboard" ? (
             <DashboardView data={workspace} error={error} onRefresh={() => void refreshWorkspace()} onNavigate={selectView} />
           ) : view === "Sources" ? (
-            <SourcesView sources={filteredSources} filter={sourceFilter} onFilter={setSourceFilter} pending={pending} error={error} onOpen={(source, trigger) => { void openDocument(source, trigger); }} onRefresh={() => { setSources(null); void loadSources(); }} />
+            <SourcesView sources={filteredSources} filter={sourceFilter} onFilter={setSourceFilter} typeFilter={sourceTypeFilter} onTypeFilter={setSourceTypeFilter} pending={pending} error={error} onOpen={(source, trigger) => { void openDocument(source, trigger); }} onRefresh={() => { setSources(null); void loadSources(); }} />
           ) : view === "Ingest" ? (
             <IngestView
               role={role}
@@ -626,10 +628,11 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   );
 }
 
-function AskView({ identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onSource }: {
+function AskView({ identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource }: {
   identity: string; role: string; query: string; setQuery: (value: string) => void; askedQuery: string;
   result: QueryResult | null; pending: boolean; error: string | null;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onRetry: () => void;
   onSource: (citation: Citation, trigger: HTMLElement) => void;
 }) {
   const refs = result ? [...new Map(result.claims.flatMap((claim) => claim.citations).map((citation) => [citation.citation_id, citation])).values()] : [];
@@ -641,14 +644,15 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
         {result.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response" role="status"><div className="answer-avatar" aria-hidden="true">C</div><div><p className="response-primary">I couldn’t find enough authorized evidence to answer.</p><p className="response-secondary">Try a more specific question or ask your workspace administrator about available sources.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy">
           {result.claims.map((claim, index) => <p key={`${result.request_id}-${index}`}>{claim.text} {claim.citations.map((citation) => <button className="inline-citation" key={citation.citation_id} type="button" aria-label={`Open source: ${citation.title ?? "Evidence"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(result.claims, citation.citation_id)}]</button>)}</p>)}
           {result.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Claims without a valid source citation were omitted.</p>}
-          <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />{result.state === "CITATION_VALIDATED" ? "Citations validated" : "Partially validated"}</span><span>{result.trace.evidence_items_sent_to_model} authorized evidence items</span>{result.trace.generation_model && <span>{result.trace.generation_model}{result.trace.fallback_used ? " · fallback" : ""}</span>}<span className="answer-latency" title="Database ranking is included in retrieval timing">Total {formatLatency(result.trace.timing_ms.total_ms)} · retrieval + ranking {formatLatency(result.trace.timing_ms.retrieval_and_ranking_ms)}</span>
+          <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />{result.state === "CITATION_VALIDATED" ? "Citations and excerpt matches checked" : "Partially validated"}</span><span>{result.trace.evidence_items_sent_to_model} authorized evidence items</span>{result.trace.generation_model && <span>{result.trace.generation_model}{result.trace.fallback_used ? " · fallback" : ""}</span>}<span className="answer-latency" title="Database ranking is included in retrieval timing">Total {formatLatency(result.trace.timing_ms.total_ms)} · retrieval + ranking {formatLatency(result.trace.timing_ms.retrieval_and_ranking_ms)}</span>
             {refs.length > 0 && <button className="view-sources" type="button" onClick={(event) => onSource(refs[0], event.currentTarget)}>View sources <Icon name="arrow" size={15} /></button>}
           </div>
+          <p className="trace-disclaimer">Source IDs and exact excerpt matches were checked; semantic claim entailment is not verified.</p>
           <details className="latency-details"><summary>Timing details</summary><span>Session/auth {formatLatency(result.trace.timing_ms.auth_session_ms)} · embedding {formatLatency(result.trace.timing_ms.embedding_ms)} · retrieval + database ranking {formatLatency(result.trace.timing_ms.retrieval_and_ranking_ms)} · ranking alone not exposed · Gemini {formatLatency(result.trace.timing_ms.gemini_ms)} · citation checks {formatLatency(result.trace.timing_ms.citation_validation_ms)} · total {formatLatency(result.trace.timing_ms.total_ms)}</span></details>
         </div></div>}
       </div> : <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="chat" size={22} /></div><p>Ask about a document, image, or business record.</p><div className="question-examples" aria-label="Example questions">{exampleQuestions.map((example) => <button className="sample-question" type="button" key={example} onClick={() => setQuery(example)}><span>{example}</span><Icon name="arrow" size={17} /></button>)}</div></div>}
       {pending && <p className="request-status" role="status"><span className="loading-dot" />Checking your session, searching authorized sources, and preparing a cited answer…</p>}
-      {error && <p className="request-error" role="alert">{error}</p>}
+      {error && <div className="request-error" role="alert"><p>{error}</p><button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button></div>}
     </div>
     <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask a question about your knowledge..." maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Please wait; duplicate requests are disabled." : "Enter to ask · Shift + Enter for a new line"}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Searching" : "Ask"}</span></button></div></form></div>
   </>;
@@ -665,13 +669,13 @@ function DashboardView({ data, error, onRefresh, onNavigate }: { data: Workspace
   </div>;
 }
 
-function SourcesView({ sources, filter, onFilter, pending, error, onOpen, onRefresh }: {
-  sources: Source[] | null; filter: string; onFilter: (value: string) => void; pending: boolean; error: string | null;
+function SourcesView({ sources, filter, onFilter, typeFilter, onTypeFilter, pending, error, onOpen, onRefresh }: {
+  sources: Source[] | null; filter: string; onFilter: (value: string) => void; typeFilter: string; onTypeFilter: (value: string) => void; pending: boolean; error: string | null;
   onOpen: (source: Source, trigger: HTMLElement) => void; onRefresh: () => void;
 }) {
   if (!sources) return <PageState title="Sources" pending={pending} error={error} onRefresh={onRefresh} />;
   return <div className="data-page"><PageHeading title="Sources" description="Only documents visible under your current database policies appear here." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
-    <div className="sources-toolbar"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Filter by name, type, or ID" /></label><p className="list-count">{sources.length} authorized {sources.length === 1 ? "source" : "sources"}</p></div>
+    <div className="sources-toolbar"><div className="sources-filters"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Search authorized names or IDs" /></label><label className="source-type-filter"><span className="sr-only">Filter by source type</span><select value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}><option value="all">All types</option><option value="pdf">PDF</option><option value="image_ocr">Image / OCR</option><option value="structured">Structured record</option></select></label></div><p className="list-count">{sources.length} authorized {sources.length === 1 ? "source" : "sources"}</p></div>
     {sources.length ? <div className="source-table-wrap"><table className="source-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th><th><span className="sr-only">Open source</span></th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{source.id}</small></td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><button className="text-button" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open</button></td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
   </div>;
 }
@@ -686,7 +690,7 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
     {!available && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>The local ingestion service is unavailable. Confirm the local API and Supabase are running.</span></div>}
     {available && role !== "CEO" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>Ingestion is restricted to the CEO demo account. Your current role remains read-only.</span></div>}
     {error && <p className="request-error" role="alert">{error}</p>}
-    <div className={`ingest-progress ${error ? "ingest-failed" : result ? "ingest-indexed" : ""}`} role="status"><strong>{error ? "Failed" : result ? "Indexed" : pending ? "Uploading, processing, and embedding" : file ? "Ready to upload" : "Ready"}</strong><span>{error ? "Your selected file or record remains available to retry." : result ?? (pending ? "The API extracts and indexes this source before returning." : "PDF, PNG, JPEG, or structured records can be indexed here.")}</span></div>
+    <div className={`ingest-progress ${error ? "ingest-failed" : result ? "ingest-indexed" : ""}`} role="status"><strong>{error ? "Failed" : result ? "Indexed" : pending ? "Indexing source…" : file ? "Ready to upload" : "Ready"}</strong><span>{error ? "Your selected file or record remains available to retry." : result ?? (pending ? "The API processes and indexes this source before returning; per-stage progress is not available." : "PDF, PNG, JPEG, or structured records can be indexed here.")}</span></div>
     <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div>
       <label className="file-drop"><input type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" disabled={!canIngest || pending} onChange={(event) => { const selected = event.target.files?.[0] ?? null; const extension = selected?.name.toLowerCase().split(".").pop(); if (selected && (!extension || !["pdf", "png", "jpg", "jpeg"].includes(extension) || selected.size === 0 || selected.size > 25 * 1024 * 1024)) { setFile(null); event.currentTarget.value = ""; return; } setFile(selected); }} /><Icon name="files" size={20} /><strong>{file?.name ?? "Choose a source file"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : "PDF text and scanned pages, or image OCR · max 25 MB"}</span></label>
       <label className="field-label">Grant source to<select value={accessRole} disabled={!canIngest || pending} onChange={(event) => setAccessRole(event.target.value)}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
@@ -708,17 +712,18 @@ function SecurityView({ data, pending, error, onRefresh }: { data: SecurityData 
   return <div className="data-page"><PageHeading title="Security" description="Identity and authorization decisions from the current API session." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh trace</button>} />
     <div className="security-identity"><span className="security-mark"><Icon name="lock" size={20} /></span><div><strong>Authenticated · {data.identity.display_name}</strong><span>{data.identity.email} · Active demo context: {data.active_role}</span></div><span className="status-pill status-good">Session verified</span></div>
     <section className="data-section"><SectionTitle title="Effective access scope" /><p className="scope-copy">{data.effective_scope}</p><div className="security-checks">{Object.entries(data.security_tests).map(([label, value]) => <div key={label}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></div>)}</div></section>
-    <section className="data-section"><SectionTitle title="Recent retrieval decisions" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count} authorized evidence items · {entry.unauthorized_evidence_count} unauthorized items supplied</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question to see a real retrieval trace for this session.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Recent events are held in this API process and clear when it restarts.</p></section>
+    <section className="data-section"><SectionTitle title="Retrieval authorization boundary" /><div className="security-flow"><span>Identity</span><b>→</b><span>Authorization</span><b>→</b><span>Secure retrieval</span><b>→</b><span>Authorized evidence</span><b>→</b><span>Generation</span></div><p className="trace-disclaimer">Architectural design: retrieval uses the validated user or server-brokered demo-role session. Unauthorized evidence supplied to the model: not independently measured in this trace. The endpoint does not probe hosted RLS status.</p></section>
+    <section className="data-section"><SectionTitle title="Recent retrieval decisions" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count} authorized evidence items · unauthorized evidence supplied to the model: not independently measured</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question to see a real retrieval trace for this session.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Recent events are held in this API process and clear when it restarts.</p></section>
   </div>;
 }
 
 function EvaluationView({ data, pending, error, role, onRefresh, onRun }: { data: EvaluationData | null; pending: boolean; error: string | null; role: string; onRefresh: () => void; onRun: () => void }) {
-  return <div className="data-page"><PageHeading title="Evaluation" description="Measured results from the local NovaCore retrieval and authorization suite." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
+  return <div className="data-page"><PageHeading title="Evaluation" description="Local synthetic smoke results for retrieval and authorization; not a production benchmark." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
     {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : <><h2>No evaluation run recorded</h2><p>Run the real retrieval suite to measure recall, ranking, modality coverage, and authorization boundaries.</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Running evaluation…" : "Run evaluation"}</button>{role !== "CEO" && <small>Switch to the CEO demo user to run the local test suite.</small>}</div> : <>
       <p className="evaluation-scope">Retrieval quality · Recall@12 {formatMetric(data.retrieval_recall_at_k)} · MRR {formatMetric(data.mean_reciprocal_rank)} <span>Authorization security · {data.authorization_violations} measured leaks</span> <span>Citation validation · {String(data.measured_checks?.citation_provenance_valid ?? "not measured")} provenance checks</span> <span>Latency · {formatLatency(data.measured_checks?.mean_latency_ms)}</span></p>
       <div className="evaluation-summary"><div><span>Dataset</span><strong>{data.dataset}</strong></div><div><span>Queries</span><strong>{data.query_count}</strong></div><div><span>Recall@12</span><strong>{formatMetric(data.retrieval_recall_at_k)}</strong></div><div><span>Mean reciprocal rank</span><strong>{formatMetric(data.mean_reciprocal_rank)}</strong></div><div><span>Authorization leaks</span><strong className={data.authorization_violations ? "metric-bad" : "metric-good"}>{data.authorization_violations}</strong></div></div>
       <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong></td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
-      <p className="trace-disclaimer">Retrieved with authenticated demo users against the local database. This run measures retrieval and row-level authorization; it does not score semantic answer quality.</p>
+      <p className="trace-disclaimer">Retrieved with authenticated demo users against the local database. This small synthetic run measures retrieval and row-level authorization; it does not establish representative-scale quality or semantic answer quality.{data.completed_at ? ` Completed ${formatTime(data.completed_at)}.` : ""}</p>
       <button className="quiet-button" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Running…" : "Run again"}</button>
     </>}
   </div>;

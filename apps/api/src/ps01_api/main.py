@@ -69,6 +69,10 @@ async def integration_failure_handler(_request: Request, exc: IntegrationFailure
     LOGGER.warning("Integration failure [%s]: %s", exc.code, exc)
     messages = {
         "provider_unavailable": "Answer generation is temporarily unavailable. Try again shortly.",
+        "provider_rate_limited": (
+            "Answer generation is rate-limited. Your retrieved evidence remains protected; "
+            "retry later."
+        ),
         "provider_timeout": "The answer service took too long to respond. Please try again.",
         "provider_invalid_response": (
             "The answer service returned an unusable response. Please retry."
@@ -374,9 +378,9 @@ async def workspace_summary(
         try:
             saved_evaluation = json.loads(EVALUATION_RESULTS.read_text())
             latest_evaluation_status = (
-                "passed"
+                "recorded pass (not freshly run)"
                 if saved_evaluation.get("authorization_violations") == 0
-                else "review"
+                else "recorded review (not freshly run)"
             )
         except (OSError, ValueError, AttributeError):
             latest_evaluation_status = "unavailable"
@@ -404,7 +408,9 @@ async def workspace_summary(
         "authorization": "active" if identity["role"] != "Unassigned" else "unassigned",
         "api": "connected",
         "supabase": "connected",
-        "gemini": "configured" if settings.gemini_api_key else "missing",
+        "gemini": "configured; availability not checked"
+        if settings.gemini_api_key
+        else "not configured",
         "ingestion": "ready"
         if _local_demo_enabled() and settings.supabase_secret_key
         else "local admin key unavailable",
@@ -431,7 +437,6 @@ async def security_status(
             "state": item.get("state"),
             "active_role": item.get("active_role", "unknown"),
             "authorized_evidence_count": item.get("evidence_count", 0),
-            "unauthorized_evidence_count": 0,
             "decision": "authorized retrieval"
             if item.get("evidence_count", 0)
             else "no authorized evidence",
@@ -445,10 +450,8 @@ async def security_status(
         "trace": trace,
         "security_tests": {
             "user_session_required": "enforced",
-            "database_row_level_security": "active (local migration)"
-            if _local_demo_enabled()
-            else "configured; hosted state unverified",
-            "unauthorized_evidence_to_model": 0,
+            "database_row_level_security": "configured; status not checked by this endpoint",
+            "unauthorized_evidence_to_model": "not independently measured in this trace",
             "basis": (
                 "Retrieval uses a server-authorized role session; the model receives only rows "
                 "returned under that session's RLS policies."
@@ -807,16 +810,12 @@ async def query_knowledge(
                     client, settings, actor_token, identity, demo_role
                 )
             finally:
-                timings["auth_session_ms"] = round(
-                    (time.perf_counter() - auth_started) * 1000, 1
-                )
+                timings["auth_session_ms"] = round((time.perf_counter() - auth_started) * 1000, 1)
             embedding_started = time.perf_counter()
             try:
                 embedding = await create_embedding(client, settings, request.query)
             finally:
-                timings["embedding_ms"] = round(
-                    (time.perf_counter() - embedding_started) * 1000, 1
-                )
+                timings["embedding_ms"] = round((time.perf_counter() - embedding_started) * 1000, 1)
             retrieval_started = time.perf_counter()
             try:
                 evidence = await retrieve_chunks(
@@ -886,7 +885,6 @@ async def query_knowledge(
             "session_verified": True,
             "database_request_used_user_session": True,
             "evidence_items_sent_to_model": len(model_context),
-            "unauthorized_evidence_sent_to_model": 0,
             "generation_model": generation_model,
             "fallback_used": fallback_used,
             "active_role": active_role,

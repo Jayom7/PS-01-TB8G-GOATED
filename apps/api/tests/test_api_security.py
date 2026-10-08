@@ -58,6 +58,9 @@ class TestApiSecurity:
                     {
                         "text": "Invoice INV-2048 is USD 48,000.",
                         "citation_ids": [authorized["chunk_id"]],
+                        "supporting_quotes": [
+                            {"citation_id": authorized["chunk_id"], "quote": authorized["content"]}
+                        ],
                     }
                 ]
             }
@@ -89,7 +92,7 @@ class TestApiSecurity:
         assert response.status_code == 200
         assert response.json()["state"] == "CITATION_VALIDATED"
         assert response.json()["trace"]["evidence_items_sent_to_model"] == 1
-        assert response.json()["trace"]["unauthorized_evidence_sent_to_model"] == 0
+        assert "unauthorized_evidence_sent_to_model" not in response.json()["trace"]
         assert len(captured) == 1
         assert "USD 48,000" in captured[0]
         assert "trusted-session-token" not in captured[0]
@@ -123,7 +126,7 @@ class TestApiSecurity:
         assert response.status_code == 200
         assert response.json()["state"] == "INSUFFICIENT_EVIDENCE"
         assert response.json()["trace"]["evidence_items_sent_to_model"] == 0
-        assert response.json()["trace"]["unauthorized_evidence_sent_to_model"] == 0
+        assert "unauthorized_evidence_sent_to_model" not in response.json()["trace"]
         generate.assert_not_awaited()
 
     def test_source_lookup_requires_a_bearer_session(self) -> None:
@@ -131,9 +134,7 @@ class TestApiSecurity:
         assert response.status_code == 401
 
     def test_source_preview_requires_a_bearer_session(self) -> None:
-        response = self.client.get(
-            "/api/v1/sources/11111111-1111-4111-8111-111111111111/preview"
-        )
+        response = self.client.get("/api/v1/sources/11111111-1111-4111-8111-111111111111/preview")
         assert response.status_code == 401
 
     def test_provider_timeout_has_safe_distinct_error_contract(self) -> None:
@@ -168,6 +169,36 @@ class TestApiSecurity:
         assert body["code"] == "provider_timeout"
         assert body["timing_ms"]["gemini_ms"] >= 0
         assert body["timing_ms"]["total_ms"] >= body["timing_ms"]["gemini_ms"]
+
+    def test_provider_rate_limit_has_distinct_safe_error_contract(self) -> None:
+        with (
+            patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
+            patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
+            patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
+            patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
+            patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
+        ):
+            auth.return_value = {"id": "trusted-session-user"}
+            identity.return_value = {
+                "user_id": "trusted-session-user",
+                "organization_id": "trusted-org",
+                "role": "CEO",
+                "roles": ["CEO"],
+            }
+            embed.return_value = [0.0] * 1536
+            retrieve.return_value = [{"chunk_id": "authorized", "content": "evidence"}]
+            generate.side_effect = IntegrationFailure(
+                "Gemini rate limited", code="provider_rate_limited"
+            )
+            response = self.client.post(
+                "/api/v1/chat/query",
+                headers={"Authorization": "Bearer trusted-session-token"},
+                json={"query": "Summarize the available evidence."},
+            )
+
+        assert response.status_code == 503
+        assert response.json()["code"] == "provider_rate_limited"
+        assert "rate-limited" in response.json()["detail"]
 
     def test_non_ceo_cannot_forge_a_ceo_context_header(self) -> None:
         with (

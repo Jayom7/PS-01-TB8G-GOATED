@@ -42,6 +42,19 @@ def make_pdf(path: Path, text: str | None) -> None:
     document.close()
 
 
+def make_png_header(width: int, height: int) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+
+
+def make_jpeg_header(width: int, height: int) -> bytes:
+    return (
+        b"\xff\xd8\xff\xc0\x00\x11\x08"
+        + height.to_bytes(2, "big")
+        + width.to_bytes(2, "big")
+        + b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+    )
+
+
 def test_split_text_preserves_all_content_and_bounds_chunks() -> None:
     text = "alpha " * 1_000
     chunks = split_text(text, max_chars=80)
@@ -85,7 +98,7 @@ def test_scanned_pdf_page_uses_ocr_and_keeps_page_and_region(tmp_path: Path) -> 
 
 def test_image_ocr_keeps_image_id_and_regions(tmp_path: Path) -> None:
     image_path = tmp_path / "invoice.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsynthetic image bytes")
+    image_path.write_bytes(make_png_header(100, 80) + b"synthetic image bytes")
     engine = FakeOcrEngine()
 
     chunks = extract_image_ocr(image_path, "image-invoice-2048", engine=engine)
@@ -95,6 +108,28 @@ def test_image_ocr_keeps_image_id_and_regions(tmp_path: Path) -> None:
     assert chunks[0].image_id == "image-invoice-2048"
     assert chunks[0].source_id == "image-invoice-2048"
     assert chunks[1].chunk_index == 1
+
+
+def test_image_rejects_excessive_pixel_count_before_ocr(tmp_path: Path) -> None:
+    image_path = tmp_path / "oversized.png"
+    image_path.write_bytes(make_png_header(5_000, 5_000))
+    engine = FakeOcrEngine()
+
+    with pytest.raises(IngestionError, match="pixels"):
+        extract_image_ocr(image_path, "oversized", engine=engine)
+
+    assert engine.inputs == []
+
+
+def test_jpeg_header_dimensions_are_read_before_ocr(tmp_path: Path) -> None:
+    image_path = tmp_path / "invoice.jpg"
+    image_path.write_bytes(make_jpeg_header(100, 80))
+    engine = FakeOcrEngine()
+
+    chunks = extract_image_ocr(image_path, "jpeg-invoice", engine=engine)
+
+    assert len(chunks) == 2
+    assert len(engine.inputs) == 1
 
 
 def test_image_rejects_a_mismatched_file_signature(tmp_path: Path) -> None:

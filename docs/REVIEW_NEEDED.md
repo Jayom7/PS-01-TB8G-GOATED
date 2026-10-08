@@ -10,9 +10,12 @@ or deeper review. It does not certify the system as secure.
   secret key. The migration enables RLS on every app table, removes default
   API-role table privileges before regranting required reads, and restricts
   retrieval RPC execution to authenticated users.
-- **Verified locally:** migration applied to local Supabase; 17 pgTAP assertions
-  pass for RLS, grants, RPC execution, finance allow, HR denial, source
-  visibility, and cross-organization isolation. Local schema lint passes.
+- **Verified locally:** migration applied to local Supabase; 24 pgTAP assertions
+  pass for RLS, grants, RPC execution, CEO breadth, Finance/HR/Sales/Engineer
+  allow/deny, unauthorized citation lookup, forged organization claims, and
+  cross-organization isolation. The API rejects client-supplied user, role,
+  organization, ACL, and evidence fields. Local schema lint passed earlier;
+  rerun after any schema change.
 - **Unverified on hosted project:** Supabase CLI authentication is missing, so
   hosted migration, request identity propagation, policies, and grants have
   not been checked there.
@@ -25,10 +28,10 @@ or deeper review. It does not certify the system as secure.
 
 - **Implemented locally:** HNSW and full-text indexes plus an invoker hybrid
   retrieval RPC are applied and exercised against local Supabase.
-- **Verified locally:** synthetic evaluation reports Recall@12 1.0 and MRR
-  0.775 over five retrieval cases, zero authorization violations, valid
-  provenance for all 39 returned citations, and OCR, structured, and
-  cross-modal retrieval coverage.
+- **Verified locally:** latest six-case evaluation reports Recall@12 1.0 and
+  MRR 0.775 over five retrieval queries plus one direct RLS check, zero
+  authorization violations, and OCR, structured, and cross-modal retrieval
+  coverage. It is a small synthetic smoke suite, not production evidence.
 - **Unverified:** this sample is too small for production conclusions;
   filtered candidate recall, iterative scan settings, `EXPLAIN` plans, and
   representative latency have not been measured.
@@ -42,9 +45,9 @@ or deeper review. It does not certify the system as secure.
   authenticated API calls. The client cannot submit role, user, organization,
   ACL, or evidence fields in a query.
 - **Verified locally:** five NovaCore auth users, profiles, and role records
-  were created in local Supabase. CEO-to-Finance and Finance-to-HR switching
-  returned new Supabase sessions and updated the resolved API role. Local
-  credentials are stored separately in a git-ignored owner-only file. No
+  were created in local Supabase. Browser CEO-to-HR switching returned a new
+  Supabase session and the dashboard/source counts changed to the HR scope.
+  Local credentials are stored separately in a git-ignored owner-only file. No
   hosted users were created.
 - **Boundary:** switching is only enabled when both local Supabase and the
   ignored demo credential file are present. Do not enable this broker for a
@@ -56,23 +59,39 @@ or deeper review. It does not certify the system as secure.
   structured-row normalization, Gemini embeddings, CEO-gated local upload and
   structured ingestion routes, private original-file storage, and role grants.
   PaddleOCR was exercised on the synthetic invoice scan.
+- **Verified locally:** the seed pipeline indexed 19 sources, 45 chunks, and
+  7 structured records; browser browsing and an authorized structured-source
+  excerpt work against the production build.
 - **Not implemented:** background ingestion jobs. The local upload and
   service-key persistence paths have not been reviewed for hosted deployment.
-- **Next review:** exercise uploaded file/structured flows end to end and
+- **Next review:** exercise browser-uploaded file/structured flows end to end and
   review source provenance, write rollback, and access inheritance before any
   hosted ingestion deployment.
 
 ## R-005 — Live provider and database connectivity
 
-- **Verified:** Supabase Auth settings and Gemini model/embedding checks
-  returned HTTP 200; live embedding produced 1536 dimensions. A live Finance
-  answer succeeded with Gemini 3.8 Flash and two citations. Later, Gemini
-  generation returned 503 `UNAVAILABLE` and timed out on both configured
-  models during an adversarial prompt run; the final live provider result is
-  therefore incomplete.
+- **Verified:** local Supabase Auth and API health/workspace/source requests
+  work. Live Gemini embedding produced 1536 dimensions. In the production
+  browser build, the CEO invoice query returned a real answer with an OCR
+  citation using the 3.6 Flash fallback; opening the citation returned the
+  authorized excerpt. Other generation attempts failed with a bounded timeout,
+  malformed model output, or provider-unavailable response. The provider is
+  usable intermittently but not reliable enough for a multi-query demo.
 - **Blocked:** hosted database migration and schema checks require Supabase CLI
   authentication or direct database credentials. Current API keys alone do
   not provide the CLI project token or database password.
+
+## R-008 — Live Gemini answer reliability
+
+- **Implemented:** two configured generation models, bounded requests and
+  retries, explicit fallback tracing, citation membership validation, and
+  distinct safe messages for timeout, unavailable provider, and invalid model
+  output.
+- **Observed:** one browser answer succeeded; three requested finance queries
+  and one indexed-document-injection query did not all succeed consistently.
+- **Next review:** inspect provider quota, model availability, and response
+  payloads in Gemini's console. Repeat the four exact demo prompts and both
+  injection cases; preserve raw diagnostics server-side without exposing keys.
 
 ## R-006 — Exact model-context authorization proof
 
@@ -92,3 +111,14 @@ or deeper review. It does not certify the system as secure.
   prove grounding.
 - **Next review:** define and measure claim-level support checks, including
   adversarial and prompt-injection cases, before labeling answers grounded.
+
+## R-009 — Hosted environment and GitHub CLI
+
+- **Blocked:** `supabase projects list` reports that no Supabase CLI access
+  token is configured. No hosted project could be identified or safely linked;
+  no hosted migrations, seeds, identities, or ACL changes were attempted.
+- **Required:** authenticate the Supabase CLI and identify the intended project;
+  then review its migration history and existing data before applying anything.
+- **GitHub CLI:** the `gh` executable is not installed. Git remote points to the
+  expected origin; commit/push status must be read from Git and is not inferred
+  from local state.

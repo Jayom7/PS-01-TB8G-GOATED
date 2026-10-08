@@ -3,6 +3,7 @@
   "records": [
     {
       "invoice_id": "ACM-INV-2048",
+      "customer_id": "CUST-ACM-1001",
       "customer": "Acme Manufacturing",
       "currency": "USD",
       "total_minor_units": 4800000,

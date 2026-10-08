@@ -12,9 +12,10 @@ workspace operations.
   question, calls `match_knowledge_chunks` with the same user token, and sends
   only RLS-returned evidence to Gemini. The request accepts a query, not a
   client-supplied identity, role, ACL, or evidence set.
-- `GET /api/v1/sources` and `GET /api/v1/sources/{source_id}` — list and open
-  only documents/chunks visible to the signed-in user. Hidden and missing
-  citation rows share the same 404 response.
+- `GET /api/v1/sources`, `GET /api/v1/sources/{citation_id}`, and
+  `GET /api/v1/sources/{document_id}/preview` — list and open only
+  documents/chunks visible to the signed-in user. Hidden and missing source
+  rows share the same 404 response.
 - `GET /api/v1/evaluation` — authenticated read of current evaluation results;
   `POST /api/v1/evaluation/run` is CEO-only and local-demo-only.
 - `POST /api/v1/demo/switch` — changes to a seeded role user's real Supabase
@@ -41,8 +42,10 @@ source .venv/bin/activate
 pip install -e 'apps/api[dev,ingestion]'
 ```
 
-Create `.env` from `.env.example` for the Gemini server key. Start Supabase
-with `./node_modules/.bin/supabase start`; the local API launcher obtains the
+Create `.env` from `.env.example` for the Gemini server key. Start Docker
+Desktop, then Supabase with
+`PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./node_modules/.bin/supabase start`;
+the local API launcher obtains the
 local Supabase URL and keys directly from the CLI without displaying them,
 refuses remote URLs, then binds FastAPI to `127.0.0.1:8000`:
 
@@ -61,6 +64,7 @@ Run the API checks with:
 ```sh
 .venv/bin/ruff check apps/api/src apps/api/scripts apps/api/tests
 .venv/bin/pytest apps/api/tests -q
+PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./node_modules/.bin/supabase test db
 ```
 
 The local evaluation runner exercises retrieval and authorization against the

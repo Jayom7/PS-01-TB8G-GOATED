@@ -7,6 +7,7 @@ import os
 import secrets
 import shlex
 import subprocess
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -294,19 +295,14 @@ async def main() -> None:
         )
 
         candidates = collect_candidates()
-        async with httpx.AsyncClient(timeout=35.0) as embedding_client:
-            vectors = await asyncio.gather(
-                *(
-                    embed_candidate(embedding_client, settings, candidate)
-                    for _, candidate in candidates
-                )
-            )
-
+        source_chunk_counts = Counter(source["source_id"] for source, _ in candidates)
         source_documents: dict[str, str] = {}
+        refresh_source_ids: set[str] = set()
         for source in manifest["sources"]:
             path = CORPUS / source["path"]
             raw_bytes = path.read_bytes()
             content_hash = hashlib.sha256(raw_bytes).hexdigest()
+            local_path = str(path.relative_to(CORPUS))
             rows = request_rows(
                 client,
                 base_url,
@@ -314,26 +310,67 @@ async def main() -> None:
                 "documents",
                 params={
                     "organization_id": f"eq.{org_id}",
-                    "content_hash": f"eq.{content_hash}",
-                    "select": "id",
+                    "metadata->>local_demo_path": f"eq.{local_path}",
+                    "select": "id,content_hash,metadata",
                 },
             )
             document_metadata = {
                 "category": source["category"],
-                "local_demo_path": str(path.relative_to(CORPUS)),
+                "chunk_count": source_chunk_counts[source["source_id"]],
+                "local_demo_path": local_path,
                 "synthetic": True,
             }
             if rows:
                 document_id = str(rows[0]["id"])
-                updated = client.patch(
-                    f"{base_url}/rest/v1/documents",
-                    headers=rest_headers(service_key)
-                    | {"Content-Type": "application/json", "Prefer": "return=minimal"},
-                    params={"id": f"eq.{document_id}"},
-                    json={"storage_path": None, "metadata": document_metadata},
-                )
-                updated.raise_for_status()
+                if rows[0].get("content_hash") != content_hash:
+                    updated = client.patch(
+                        f"{base_url}/rest/v1/documents",
+                        headers=rest_headers(service_key)
+                        | {"Content-Type": "application/json", "Prefer": "return=minimal"},
+                        params={"id": f"eq.{document_id}"},
+                        json={
+                            "source_type": source["source_type"],
+                            "source_name": path.name,
+                            "content_hash": content_hash,
+                            "storage_path": None,
+                            "metadata": document_metadata,
+                        },
+                    )
+                    updated.raise_for_status()
+                    for table in ("knowledge_chunks", "access_grants"):
+                        deleted = client.delete(
+                            f"{base_url}/rest/v1/{table}",
+                            headers=rest_headers(service_key),
+                            params={"document_id": f"eq.{document_id}"},
+                        )
+                        deleted.raise_for_status()
+                    refresh_source_ids.add(source["source_id"])
+                elif rows[0].get("metadata") != document_metadata:
+                    updated = client.patch(
+                        f"{base_url}/rest/v1/documents",
+                        headers=rest_headers(service_key)
+                        | {"Content-Type": "application/json", "Prefer": "return=minimal"},
+                        params={"id": f"eq.{document_id}"},
+                        json={"metadata": document_metadata},
+                    )
+                    updated.raise_for_status()
             else:
+                duplicates = request_rows(
+                    client,
+                    base_url,
+                    service_key,
+                    "documents",
+                    params={
+                        "organization_id": f"eq.{org_id}",
+                        "content_hash": f"eq.{content_hash}",
+                        "select": "id,metadata",
+                    },
+                )
+                if duplicates:
+                    raise RuntimeError(
+                        "A matching file exists outside the tagged synthetic demo corpus; "
+                        "refusing to modify it."
+                    )
                 document_rows = write_rows(
                     client,
                     base_url,
@@ -351,10 +388,24 @@ async def main() -> None:
                     ],
                 )
                 document_id = str(document_rows[0]["id"])
+                refresh_source_ids.add(source["source_id"])
             source_documents[source["source_id"]] = document_id
 
+        candidates_to_embed = [
+            (source, candidate)
+            for source, candidate in candidates
+            if source["source_id"] in refresh_source_ids
+        ]
+        async with httpx.AsyncClient(timeout=35.0) as embedding_client:
+            vectors = await asyncio.gather(
+                *(
+                    embed_candidate(embedding_client, settings, candidate)
+                    for _, candidate in candidates_to_embed
+                )
+            )
+
         chunk_rows: list[dict[str, object]] = []
-        for (source, candidate), vector in zip(candidates, vectors, strict=True):
+        for (source, candidate), vector in zip(candidates_to_embed, vectors, strict=True):
             chunk_rows.append(
                 {
                     "organization_id": org_id,
@@ -375,14 +426,15 @@ async def main() -> None:
                     "embedding": vector,
                 }
             )
-        write_rows(
-            client,
-            base_url,
-            service_key,
-            "knowledge_chunks",
-            chunk_rows,
-            on_conflict="document_id,chunk_index",
-        )
+        if chunk_rows:
+            write_rows(
+                client,
+                base_url,
+                service_key,
+                "knowledge_chunks",
+                chunk_rows,
+                on_conflict="document_id,chunk_index",
+            )
 
         grants: list[dict[str, object]] = []
         for source in manifest["sources"]:
@@ -401,12 +453,32 @@ async def main() -> None:
             base_url,
             service_key,
             "access_grants",
-            params={"organization_id": f"eq.{org_id}", "select": "id"},
+            params={
+                "organization_id": f"eq.{org_id}",
+                "select": "document_id,principal_type,principal_id",
+            },
         )
-        if not existing_grants:
-            write_rows(client, base_url, service_key, "access_grants", grants)
+        existing_grant_keys = {
+            (row.get("document_id"), row.get("principal_type"), row.get("principal_id"))
+            for row in existing_grants
+        }
+        missing_grants = [
+            grant
+            for grant in grants
+            if (
+                grant["document_id"],
+                grant["principal_type"],
+                grant["principal_id"],
+            )
+            not in existing_grant_keys
+        ]
+        if missing_grants:
+            write_rows(client, base_url, service_key, "access_grants", missing_grants)
 
-    print(f"Seeded {len(users)} local demo identities and {len(chunk_rows)} source chunks.")
+    print(
+        f"Seeded {len(users)} local demo identities, {len(source_documents)} sources, "
+        f"and refreshed {len(chunk_rows)} chunks."
+    )
     print(f"Local-only credentials saved to {CREDENTIALS.name} (mode 600; git-ignored).")
 
 

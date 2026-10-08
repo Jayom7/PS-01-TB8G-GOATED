@@ -25,10 +25,13 @@ requester's identity attached to retrieval.
   and latency results. Results are saved locally and exposed to authenticated
   workspace users.
 
-The local migration set has been applied to the local Supabase stack. No hosted
-Supabase migration or hosted deployment is performed by the local demo
-launcher. Gemini 3.8 Flash is the primary generation model, with 3.6 Flash as
-fallback; provider availability can vary.
+The local migration set is applied to the local Supabase stack. The hosted
+project is not linked or verified in this checkout. Gemini 3.8 Flash is the
+primary generation model, with 3.6 Flash as fallback. A browser invoice query
+and OCR citation succeeded during the latest pass; other live requests also
+hit timeouts or malformed provider output, so answer availability is not yet
+consistent. Citation validation verifies retrieved source membership and
+location, not semantic entailment of each claim.
 
 ## Local setup
 
@@ -38,10 +41,10 @@ contains only the public Supabase URL/key and API base URL. Both local files
 are ignored by Git. Never place `GEMINI_API_KEY` or `SUPABASE_SECRET_KEY` in a
 `NEXT_PUBLIC_` variable or the web env file.
 
-Start local Supabase and seed the demo users/data:
+Start Docker Desktop, then start local Supabase and seed the demo users/data:
 
 ```sh
-./node_modules/.bin/supabase start
+PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./node_modules/.bin/supabase start
 .venv/bin/python apps/api/scripts/seed_local_demo.py
 ```
 
@@ -57,6 +60,15 @@ and binds to `127.0.0.1`. Install optional PDF/OCR dependencies with
 `pip install -e 'apps/api[ingestion]'` from the repository root, or use the
 setup documented in [API setup](apps/api/README.md).
 
-See [API setup](apps/api/README.md), [implementation plan](docs/IMPLEMENTATION_PLAN.md),
-and [review items](docs/REVIEW_NEEDED.md) for setup details and remaining proof
-boundaries.
+Demo account passwords are generated on first seed and stored only in the
+ignored, owner-readable `.local-demo-credentials.json` file. Do not copy this
+file into Git or use these local identities for a hosted project. The role
+switcher exchanges the signed-in local account for one of those real Auth
+sessions; it does not edit a client-side role label.
+
+See [API setup](apps/api/README.md), [demo plan](docs/DEMO_PLAN.md),
+[implementation plan](docs/IMPLEMENTATION_PLAN.md), and
+[review items](docs/REVIEW_NEEDED.md) for setup details and remaining proof
+boundaries. Hosted migration, hosted RLS, hosted retrieval, and production
+ingestion remain unverified; see the review file before using beyond the local
+demo.

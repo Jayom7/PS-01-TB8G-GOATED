@@ -9,28 +9,36 @@ visible without exposing denied sources.
 
 ## Three-to-five-minute flow
 
-1. Show the unified workspace and switch to Finance Manager.
-2. Ask for an overdue customer amount and the payment terms in its contract.
-   Show a structured invoice/payment row plus exact contract page citations.
-3. Open a citation to show the exact row/page/region and provenance.
+1. Sign in with the local CEO account, then switch to Finance Manager from the
+   sidebar account menu. The switch changes the Supabase Auth session.
+2. Ask: “What amount is shown on Acme's scanned invoice?” Open the inline OCR
+   citation and inspect its authorized excerpt and image provenance.
+3. Ask: “What payment terms are specified in Acme's contract?” Then ask:
+   “Is Acme overdue, and what payment terms does its contract specify?” The
+   latter is the cross-modal PDF plus structured finance case.
 4. Switch to HR Manager and repeat the finance query. Show controlled
    insufficient evidence and a safe trace with zero finance evidence IDs.
 5. Ask to ignore permissions and reveal finance data. Show that the user prompt
    cannot widen retrieval and no unauthorized evidence reaches generation.
-6. Optionally show ingestion status and measured evaluation runs.
+6. Open a source directly from Sources, then show the measured retrieval
+   evaluation. An indexed-document prompt injection is a review test, not a
+   stable live demo until Gemini generation is reliable.
 
 ## Data requirements
 
-Create synthetic, internally consistent customers, contracts, invoices,
-payments, employees, policies, projects, orders, and a few scanned images. Use
-fictional names, amounts, dates, IDs, and policy content. Ensure each source
-has a corresponding ACL and citation location. Do not fabricate evaluation
-results; render metrics only from real runs.
+The local seeded corpus currently contains 19 sources, 45 chunks, and 7
+structured records, including synthetic customer, finance, HR, sales, and
+engineering material; PDFs; and OCR images. Use fictional names, amounts,
+dates, IDs, and policy content. Sources have role grants and citation
+locations. The latest six-case local retrieval/RLS run reports Recall@12 1.0,
+MRR 0.775, and zero authorization leaks. Those figures describe a small local
+retrieval set, not semantic answer quality or hosted behavior.
 
 ## Reliability requirements
 
-Pre-seed only stable synthetic demo data. Show explicit loading and error
-states. The role switch must switch authenticated identity, not merely alter a
-front-end label. Keep one repeatable allowed query and one repeatable denial
-query as acceptance paths. Demo script is not complete until these run against
-the implemented database and tests.
+Pre-seed only synthetic demo data. Show explicit loading and error states. The
+latest browser run returned one real Gemini invoice answer with an OCR
+citation, while separate contract, invoice-status, cross-modal, and indexed
+prompt-injection attempts had timeout or malformed-provider failures. Treat
+those paths as unstable. Keep one repeatable allowed query and one denial
+query as acceptance paths; the browser-confirmed finance denial is stable.

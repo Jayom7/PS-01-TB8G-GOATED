@@ -1,0 +1,12 @@
+{
+  "table": "customers",
+  "records": [
+    {
+      "customer_id": "CUST-ACM-1001",
+      "name": "Acme Manufacturing",
+      "status": "active",
+      "contract_id": "ACM-MSA-2026-07",
+      "payment_terms": "Net 30 calendar days"
+    }
+  ]
+}

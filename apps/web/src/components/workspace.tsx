@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { Icon, type IconName } from "@/components/icons";
 import { createClient } from "@/lib/supabase/client";
 
-type View = "Dashboard" | "Ask" | "Sources" | "Ingest" | "Security" | "Evaluation";
+export type View = "Dashboard" | "Ask" | "Sources" | "Ingest" | "Security" | "Evaluation";
 type Citation = {
   citation_id: string;
   source_type: string;
@@ -23,6 +24,7 @@ type QueryResult = {
     evidence_items_sent_to_model: number;
     unauthorized_evidence_sent_to_model: number;
     generation_model: string | null;
+    fallback_used: boolean;
   };
 };
 type SourcePreview = {
@@ -47,6 +49,15 @@ type Identity = {
   role: string;
   roles: string[];
 };
+
+function readTheme(): "light" | "dark" {
+  return window.localStorage.getItem("clearframe-theme") === "dark" ? "dark" : "light";
+}
+
+function subscribeTheme(callback: () => void) {
+  window.addEventListener("clearframe-theme-change", callback);
+  return () => window.removeEventListener("clearframe-theme-change", callback);
+}
 type WorkspaceData = {
   identity: Identity;
   document_count: number;
@@ -94,20 +105,53 @@ const navigation: { label: View; icon: IconName }[] = [
   { label: "Security", icon: "lock" },
   { label: "Evaluation", icon: "chart" },
 ];
+const viewRoutes: Record<View, string> = {
+  Dashboard: "/dashboard",
+  Ask: "/ask",
+  Sources: "/sources",
+  Ingest: "/ingest",
+  Security: "/security",
+  Evaluation: "/evaluation",
+};
 const exampleQuestions = [
   "What amount is shown on Acme's scanned invoice?",
   "What payment terms are in Acme's contract?",
   "Is Acme's invoice overdue?",
   "Is Acme overdue and what payment terms does its contract specify?",
 ];
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 async function readResponse<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(typeof body?.detail === "string" ? body.detail : `Request failed (${response.status}).`);
+    const code = typeof body?.code === "string" ? body.code : "";
+    const messages: Record<string, string> = {
+      provider_unavailable: "The AI service is unavailable right now. Your question was not answered.",
+      provider_timeout: "The AI service took too long to respond. Please try again.",
+      provider_invalid_response: "The AI service returned an unusable answer. Please retry.",
+    };
+    const message = response.status === 401
+      ? "Your session expired. Sign in again to continue."
+      : response.status === 403
+        ? "Your current role does not have access to this action."
+        : response.status === 404
+          ? "This source is no longer available to your account."
+          : response.status === 422
+            ? "Check the submitted values and try again."
+            : messages[code] ?? (response.status >= 500
+              ? "The workspace service is temporarily unavailable. Please retry."
+              : "The request could not be completed. Check the input and try again.");
+    throw new Error(message);
   }
   return body as T;
+}
+
+function networkMessage(cause: unknown, fallback: string) {
+  if (cause instanceof DOMException && (cause.name === "TimeoutError" || cause.name === "AbortError")) {
+    return "The request took too long. Your input is still here; try again when the service is ready.";
+  }
+  if (cause instanceof TypeError) return "Could not reach the workspace service. Check that the API is running and try again.";
+  return cause instanceof Error ? cause.message : fallback;
 }
 
 async function currentToken() {
@@ -121,17 +165,19 @@ async function apiGet<T>(path: string) {
   return readResponse<T>(await fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
+    signal: AbortSignal.timeout(20_000),
   }));
 }
 
-export default function Workspace({ identity }: { identity: string }) {
+export default function Workspace({ identity, view }: { identity: string; view: View }) {
   const router = useRouter();
-  const [view, setView] = useState<View>("Ask");
+  const pathname = usePathname();
   const [query, setQuery] = useState("");
   const [askedQuery, setAskedQuery] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [activeSource, setActiveSource] = useState<SourcePreview | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceClosing, setSourceClosing] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [sources, setSources] = useState<Source[] | null>(null);
   const [security, setSecurity] = useState<SecurityData | null>(null);
@@ -139,13 +185,26 @@ export default function Workspace({ identity }: { identity: string }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const theme = useSyncExternalStore(subscribeTheme, readTheme, () => "light");
+  const [sourceFilter, setSourceFilter] = useState("");
   const [structuredJson, setStructuredJson] = useState('{\n  "invoice_id": "INV-2048",\n  "status": "unpaid"\n}');
   const [structuredMeta, setStructuredMeta] = useState({ table: "invoices", rowId: "INV-2048", sourceName: "Invoice record", accessRole: "CEO" });
   const [ingestFile, setIngestFile] = useState<File | null>(null);
   const [ingestResult, setIngestResult] = useState<string | null>(null);
   const sourceTrigger = useRef<HTMLElement | null>(null);
   const sourceClose = useRef<HTMLButtonElement>(null);
+  const sourceCloseTimer = useRef<number | null>(null);
   const sourceOpen = activeSource !== null;
+  const closeSource = useCallback(() => {
+    if (!sourceOpen || sourceClosing) return;
+    setSourceClosing(true);
+    sourceCloseTimer.current = window.setTimeout(() => {
+      setActiveSource(null);
+      setSourceClosing(false);
+      sourceCloseTimer.current = null;
+    }, 180);
+  }, [sourceClosing, sourceOpen]);
 
   const refreshWorkspace = useCallback(async () => {
     try {
@@ -153,7 +212,7 @@ export default function Workspace({ identity }: { identity: string }) {
       const data = await apiGet<WorkspaceData>("/api/v1/workspace");
       setWorkspace(data);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Workspace data is unavailable.");
+      setError(networkMessage(cause, "Workspace information is unavailable."));
     }
   }, []);
 
@@ -162,13 +221,16 @@ export default function Workspace({ identity }: { identity: string }) {
     return () => window.clearTimeout(timer);
   }, [refreshWorkspace]);
   useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+  useEffect(() => {
     if (sourceOpen) sourceClose.current?.focus();
     else sourceTrigger.current?.focus();
-  }, [sourceOpen]);
+  }, [closeSource, sourceOpen]);
   useEffect(() => {
     if (!sourceOpen) return;
     function onKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") setActiveSource(null);
+      if (event.key === "Escape") closeSource();
       if (event.key === "Tab") {
         event.preventDefault();
         sourceClose.current?.focus();
@@ -176,7 +238,11 @@ export default function Workspace({ identity }: { identity: string }) {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [sourceOpen]);
+  }, [closeSource, sourceOpen]);
+
+  useEffect(() => () => {
+    if (sourceCloseTimer.current !== null) window.clearTimeout(sourceCloseTimer.current);
+  }, []);
 
   async function ask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -197,16 +263,19 @@ export default function Workspace({ identity }: { identity: string }) {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ query: question }),
+        signal: AbortSignal.timeout(90_000),
       });
       setResult(await readResponse<QueryResult>(response));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The knowledge service is unavailable.");
+      setError(networkMessage(cause, "The answer could not be generated."));
     } finally {
       setPending(false);
     }
   }
 
   async function openSource(citation: Citation, trigger: HTMLElement) {
+    if (sourceCloseTimer.current !== null) window.clearTimeout(sourceCloseTimer.current);
+    setSourceClosing(false);
     sourceTrigger.current = trigger;
     setActiveSource({
       citation_id: citation.citation_id,
@@ -222,6 +291,27 @@ export default function Workspace({ identity }: { identity: string }) {
       setActiveSource(source);
     } catch (cause) {
       setSourceError(cause instanceof Error ? cause.message : "This source is unavailable.");
+    }
+  }
+
+  async function openDocument(source: Source, trigger: HTMLElement) {
+    if (sourceCloseTimer.current !== null) window.clearTimeout(sourceCloseTimer.current);
+    setSourceClosing(false);
+    sourceTrigger.current = trigger;
+    setActiveSource({
+      citation_id: source.id,
+      source_type: source.source_type,
+      title: source.source_name,
+      source_id: source.id,
+      location: {},
+      excerpt: "Loading the first authorized excerpt…",
+    });
+    setSourceError(null);
+    try {
+      const preview = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(source.id)}/preview`);
+      setActiveSource(preview);
+    } catch (cause) {
+      setSourceError(networkMessage(cause, "This source is unavailable."));
     }
   }
 
@@ -244,56 +334,66 @@ export default function Workspace({ identity }: { identity: string }) {
       await refreshWorkspace();
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not switch the demo account.");
+      setError(networkMessage(cause, "Could not switch the demo account."));
     } finally {
       setPending(false);
     }
   }
 
   async function signOut() {
-    await createClient().auth.signOut();
+    const { error: signOutError } = await createClient().auth.signOut();
+    if (signOutError) {
+      setError("Could not log out. Check your connection and try again.");
+      return;
+    }
     router.replace("/login");
     router.refresh();
   }
 
-  async function loadSources() {
+  const loadSources = useCallback(async () => {
     setPending(true);
     setError(null);
     try {
       const data = await apiGet<{ sources: Source[] }>("/api/v1/sources");
       setSources(data.sources);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Authorized sources are unavailable.");
+      setError(networkMessage(cause, "Authorized sources are unavailable."));
     } finally {
       setPending(false);
     }
-  }
+  }, []);
 
-  async function loadSecurity() {
+  const loadSecurity = useCallback(async () => {
     setPending(true);
     setError(null);
     try { setSecurity(await apiGet<SecurityData>("/api/v1/security")); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Security status is unavailable."); }
+    catch (cause) { setError(networkMessage(cause, "Security status is unavailable.")); }
     finally { setPending(false); }
-  }
+  }, []);
 
-  async function loadEvaluation() {
+  const loadEvaluation = useCallback(async () => {
     setPending(true);
     setError(null);
     try {
       const data = await apiGet<{ state: string; result: EvaluationData | null }>("/api/v1/evaluation");
       setEvaluation(data.result);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Evaluation state is unavailable."); }
+    } catch (cause) { setError(networkMessage(cause, "Evaluation state is unavailable.")); }
     finally { setPending(false); }
-  }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (view === "Sources" && sources === null) void loadSources();
+      if (view === "Security" && security === null) void loadSecurity();
+      if (view === "Evaluation" && evaluation === null) void loadEvaluation();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [evaluation, loadEvaluation, loadSecurity, loadSources, security, sources, view]);
 
   function selectView(nextView: View) {
-    setView(nextView);
     setError(null);
     setNavigationOpen(false);
-    if (nextView === "Sources" && sources === null) void loadSources();
-    if (nextView === "Security" && security === null) void loadSecurity();
-    if (nextView === "Evaluation" && evaluation === null) void loadEvaluation();
+    if (pathname !== viewRoutes[nextView]) router.push(viewRoutes[nextView]);
   }
 
   async function uploadFile(event: FormEvent<HTMLFormElement>) {
@@ -314,13 +414,14 @@ export default function Workspace({ identity }: { identity: string }) {
           "X-Access-Role": structuredMeta.accessRole,
         },
         body: ingestFile,
+        signal: AbortSignal.timeout(180_000),
       });
       const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response);
       setIngestResult(`${payload.source_name} indexed · ${payload.chunks_indexed} chunks`);
       setIngestFile(null);
       await refreshWorkspace();
       setSources(null);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Ingestion failed."); }
+    } catch (cause) { setError(networkMessage(cause, "Ingestion failed. Your file is still selected; retry when the service is available.")); }
     finally { setPending(false); }
   }
 
@@ -338,13 +439,14 @@ export default function Workspace({ identity }: { identity: string }) {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ table: structuredMeta.table, row_id: structuredMeta.rowId, source_name: structuredMeta.sourceName, fields, access_role: structuredMeta.accessRole }),
+        signal: AbortSignal.timeout(90_000),
       });
       const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response);
       setIngestResult(`${payload.source_name} indexed · ${payload.chunks_indexed} chunks`);
       await refreshWorkspace();
       setSources(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Structured record ingestion failed.");
+      setError(networkMessage(cause, "Structured record indexing failed. Check the fields and retry."));
     } finally { setPending(false); }
   }
 
@@ -358,12 +460,21 @@ export default function Workspace({ identity }: { identity: string }) {
         method: "POST", headers: { Authorization: `Bearer ${token}` },
       }));
       setEvaluation(payload.result);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The evaluation run failed."); }
+    } catch (cause) { setError(networkMessage(cause, "The evaluation run failed.")); }
     finally { setPending(false); }
   }
 
   const role = workspace?.identity.role ?? "Loading";
   const userName = workspace?.identity.display_name ?? identity;
+  const filteredSources = (sources ?? []).filter((source) =>
+    `${source.source_name} ${source.source_type} ${source.id}`.toLocaleLowerCase().includes(sourceFilter.trim().toLocaleLowerCase()),
+  );
+
+  function setSelectedTheme(next: "light" | "dark") {
+    document.documentElement.dataset.theme = next;
+    window.localStorage.setItem("clearframe-theme", next);
+    window.dispatchEvent(new Event("clearframe-theme-change"));
+  }
 
   return (
     <main className="app-shell">
@@ -374,18 +485,8 @@ export default function Workspace({ identity }: { identity: string }) {
           </button>
           <span className="brand-name">Clearframe</span>
         </div>
-        <div className="topbar-context">Secure knowledge workspace</div>
-        <div className="topbar-state">
-          {workspace?.demo_switch_available ? (
-            <label className="demo-switcher"><span>Demo user</span>
-              <select aria-label="Switch demo user" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending} onChange={(event) => void switchDemoUser(event.target.value)}>
-                {DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}
-              </select>
-            </label>
-          ) : <span className="identity-label" title={identity}>{userName}</span>}
-          <span className="role-tag">{role}</span>
-          <button className="signout-button" type="button" onClick={signOut}>Sign out</button>
-        </div>
+        <div className="topbar-context" aria-hidden="true" />
+        <div className="topbar-state"><span className="workspace-indicator"><i />Workspace</span></div>
       </header>
 
       <div className="workspace-grid">
@@ -393,14 +494,26 @@ export default function Workspace({ identity }: { identity: string }) {
           <div className="rail-workspace-label">Workspace</div>
           <nav className="primary-navigation" aria-label="Workspace">
             {navigation.map(({ label, icon }) => (
-              <button className={`navigation-item ${view === label ? "navigation-item-active" : ""}`} type="button" key={label} aria-current={view === label ? "page" : undefined} onClick={() => selectView(label)}>
+              <Link className={`navigation-item ${view === label ? "navigation-item-active" : ""}`} href={viewRoutes[label]} key={label} aria-current={view === label ? "page" : undefined} onClick={() => { setError(null); setNavigationOpen(false); }}>
                 <Icon name={icon} size={19} /><span>{label}</span>
-              </button>
+              </Link>
             ))}
           </nav>
           <div className="rail-footer">
-            <div className="preview-caption">Signed in as {role}</div>
-            <p>Queries use your verified session and database access policies.</p>
+            <p className="rail-security-note"><Icon name="lock" size={14} />Access follows your authenticated role.</p>
+            <details className="account-menu" open={accountOpen} onToggle={(event) => setAccountOpen((event.currentTarget as HTMLDetailsElement).open)}>
+              <summary className="account-trigger" aria-label={`Account menu for ${userName}`}>
+                <span className="account-avatar">{userName.slice(0, 1).toUpperCase()}</span>
+                <span className="account-identity"><strong>{userName}</strong><small>{role}</small></span>
+                <Icon name="chevron" size={16} />
+              </summary>
+              <div className="account-popover">
+                <p className="account-current"><strong>{userName}</strong><span>{workspace?.identity.email ?? identity}</span><small>Current role · {role}</small></p>
+                {workspace?.demo_switch_available && <label className="field-label account-role-field">Switch demo role<select aria-label="Switch demo role" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending} onChange={(event) => void switchDemoUser(event.target.value)}>{DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}</select></label>}
+                <button className="account-action" type="button" onClick={() => setSelectedTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "Use dark theme" : "Use light theme"}</button>
+                <button className="account-action account-logout" type="button" onClick={() => void signOut()}>Log out</button>
+              </div>
+            </details>
           </div>
         </aside>
 
@@ -420,9 +533,9 @@ export default function Workspace({ identity }: { identity: string }) {
               onSource={openSource}
             />
           ) : view === "Dashboard" ? (
-            <DashboardView data={workspace} error={error} onRefresh={() => void refreshWorkspace()} onNavigate={setView} />
+            <DashboardView data={workspace} error={error} onRefresh={() => void refreshWorkspace()} onNavigate={selectView} />
           ) : view === "Sources" ? (
-            <SourcesView sources={sources} pending={pending} error={error} onRefresh={() => { setSources(null); void loadSources(); }} />
+            <SourcesView sources={filteredSources} filter={sourceFilter} onFilter={setSourceFilter} pending={pending} error={error} onOpen={(source, trigger) => { void openDocument(source, trigger); }} onRefresh={() => { setSources(null); void loadSources(); }} />
           ) : view === "Ingest" ? (
             <IngestView
               role={role}
@@ -450,11 +563,11 @@ export default function Workspace({ identity }: { identity: string }) {
 
       {navigationOpen && <button type="button" className="mobile-scrim nav-scrim" aria-label="Close navigation" onClick={() => setNavigationOpen(false)} />}
       {sourceOpen && activeSource && <>
-        <button type="button" className="drawer-scrim" aria-label="Close source details" onClick={() => setActiveSource(null)} />
-        <aside className="source-drawer" role="dialog" aria-modal="true" aria-labelledby="source-drawer-title" onKeyDown={(event: KeyboardEvent<HTMLElement>) => { if (event.key === "Tab") { event.preventDefault(); sourceClose.current?.focus(); } }}>
+        <button type="button" className="drawer-scrim" aria-label="Close source details" onClick={closeSource} />
+        <aside className="source-drawer" data-closing={sourceClosing || undefined} role="dialog" aria-modal="true" aria-labelledby="source-drawer-title" onKeyDown={(event: KeyboardEvent<HTMLElement>) => { if (event.key === "Tab") { event.preventDefault(); sourceClose.current?.focus(); } }}>
           <header className="drawer-heading">
             <div><h2 id="source-drawer-title">Source evidence</h2><p>Authorized source lookup</p></div>
-            <button ref={sourceClose} className="icon-button" type="button" aria-label="Close source details" onClick={() => setActiveSource(null)}><Icon name="close" /></button>
+            <button ref={sourceClose} className="icon-button" type="button" aria-label="Close source details" onClick={closeSource}><Icon name="close" /></button>
           </header>
           {sourceError ? <p className="request-error" role="alert">{sourceError}</p> : <article className="drawer-source">
             <div className="drawer-source-title"><Icon name="files" size={18} /><div><strong>{activeSource.title ?? "Source"}</strong><span>{formatLocation(activeSource.location)}</span></div></div>
@@ -486,7 +599,7 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
         {result.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response" role="status"><div className="answer-avatar" aria-hidden="true">C</div><div><p className="response-primary">I couldn’t find enough authorized evidence to answer.</p><p className="response-secondary">Try a more specific question or ask your workspace administrator about available sources.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy">
           {result.claims.map((claim, index) => <p key={`${result.request_id}-${index}`}>{claim.text} {claim.citations.map((citation) => <button className="inline-citation" key={citation.citation_id} type="button" aria-label={`Open source: ${citation.title ?? "Evidence"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(result.claims, citation.citation_id)}]</button>)}</p>)}
           {result.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Claims without a valid source citation were omitted.</p>}
-          <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />{result.state === "CITATION_VALIDATED" ? "Citations validated" : "Partially validated"}</span><span>{result.trace.evidence_items_sent_to_model} authorized evidence items</span>{result.trace.generation_model && <span>{result.trace.generation_model}</span>}
+          <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />{result.state === "CITATION_VALIDATED" ? "Citations validated" : "Partially validated"}</span><span>{result.trace.evidence_items_sent_to_model} authorized evidence items</span>{result.trace.generation_model && <span>{result.trace.generation_model}{result.trace.fallback_used ? " · fallback" : ""}</span>}
             {refs.length > 0 && <button className="view-sources" type="button" onClick={(event) => onSource(refs[0], event.currentTarget)}>View sources <Icon name="arrow" size={15} /></button>}
           </div>
         </div></div>}
@@ -503,16 +616,19 @@ function DashboardView({ data, error, onRefresh, onNavigate }: { data: Workspace
   return <div className="data-page"><PageHeading title="Dashboard" description="Live state from your authenticated Clearframe workspace." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
     <div className="dashboard-identity"><span className="user-indicator">{data.identity.display_name.slice(0, 1).toUpperCase()}</span><div><strong>{data.identity.display_name}</strong><span>{data.identity.email} · {data.identity.role}</span></div><span className="status-pill status-good">Authorization active</span></div>
     <dl className="metric-strip"><Metric label="Authorized sources" value={data.document_count} /><Metric label="Searchable chunks" value={data.chunk_count} /><Metric label="Structured records" value={data.structured_record_count} /></dl>
-    <div className="dashboard-columns"><section className="data-section"><SectionTitle title="System connections" action={<span className="live-status"><i />Live</span>} /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Evaluation" value={data.evaluation} /></div></section>
+    <div className="dashboard-columns"><section className="data-section"><SectionTitle title="System connections" /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Evaluation" value={data.evaluation} /></div></section>
       <section className="data-section"><SectionTitle title="Recent queries" action={<button className="text-button" type="button" onClick={() => onNavigate("Ask")}>Ask a question</button>} />{data.recent_queries.length ? <ol className="recent-query-list">{data.recent_queries.slice(0, 6).map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.query}</span><small>{item.state.replaceAll("_", " ")} · {formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No queries in this API session yet.</p>}</section></div>
   </div>;
 }
 
-function SourcesView({ sources, pending, error, onRefresh }: { sources: Source[] | null; pending: boolean; error: string | null; onRefresh: () => void }) {
+function SourcesView({ sources, filter, onFilter, pending, error, onOpen, onRefresh }: {
+  sources: Source[] | null; filter: string; onFilter: (value: string) => void; pending: boolean; error: string | null;
+  onOpen: (source: Source, trigger: HTMLElement) => void; onRefresh: () => void;
+}) {
   if (!sources) return <PageState title="Sources" pending={pending} error={error} onRefresh={onRefresh} />;
   return <div className="data-page"><PageHeading title="Sources" description="Only documents visible under your current database policies appear here." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
-    <p className="list-count">{sources.length} authorized {sources.length === 1 ? "source" : "sources"}</p>
-    {sources.length ? <div className="source-table-wrap"><table className="source-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{source.id}</small></td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>No authorized sources yet</h2><p>Sources added for your role will appear here after ingestion.</p></div>}
+    <div className="sources-toolbar"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Filter by name, type, or ID" /></label><p className="list-count">{sources.length} authorized {sources.length === 1 ? "source" : "sources"}</p></div>
+    {sources.length ? <div className="source-table-wrap"><table className="source-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th><th><span className="sr-only">Open source</span></th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{source.id}</small></td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><button className="text-button" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open</button></td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
   </div>;
 }
 
@@ -570,7 +686,7 @@ function PageState({ title, error, pending, onRefresh }: { title: string; error?
 }
 function Metric({ label, value }: { label: string; value: number }) { return <div><dt>{label}</dt><dd>{value.toLocaleString()}</dd></div>; }
 function SectionTitle({ title, action }: { title: string; action?: React.ReactNode }) { return <div className="section-title"><h2>{title}</h2>{action}</div>; }
-function StatusRow({ label, value }: { label: string; value: string }) { const ready = ["connected", "configured", "ready", "available"].includes(value); return <div className="connection-row"><span>{label}</span><span className={`connection-state ${ready ? "is-ready" : ""}`}><i />{value.replaceAll("_", " ")}</span></div>; }
+function StatusRow({ label, value }: { label: string; value: string }) { const ready = ["connected", "ready", "available"].includes(value); return <div className="connection-row"><span>{label}</span><span className={`connection-state ${ready ? "is-ready" : ""}`}><i />{value.replaceAll("_", " ")}</span></div>; }
 
 function citationNumber(claims: Claim[], id: string) {
   const ids = [...new Set(claims.flatMap((claim) => claim.citations.map((citation) => citation.citation_id)))];

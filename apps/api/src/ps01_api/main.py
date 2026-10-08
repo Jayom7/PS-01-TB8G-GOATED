@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import runpy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ from .integrations import (
 from .rag import insufficient_evidence, prepare_generation_context, validate_generation
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+LOGGER = logging.getLogger("ps01_api")
 DEMO_CREDENTIALS = REPOSITORY_ROOT / ".local-demo-credentials.json"
 DEMO_ROLES = ("CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer")
 EVALUATION_RESULTS = REPOSITORY_ROOT / "data" / "local" / "evaluation.json"
@@ -56,14 +58,29 @@ app.add_middleware(
 
 
 @app.exception_handler(IntegrationFailure)
-async def integration_failure_handler(_request: Request, _exc: IntegrationFailure):
+async def integration_failure_handler(_request: Request, exc: IntegrationFailure):
+    LOGGER.warning("Integration failure [%s]: %s", exc.code, exc)
+    messages = {
+        "provider_unavailable": "Answer generation is temporarily unavailable. Try again shortly.",
+        "provider_timeout": "The answer service took too long to respond. Please try again.",
+        "provider_invalid_response": (
+            "The answer service returned an unusable response. Please retry."
+        ),
+    }
     return JSONResponse(
-        status_code=503, content={"detail": "An upstream workspace service is unavailable"}
+        status_code=503,
+        content={
+            "detail": messages.get(
+                exc.code, "A workspace service is temporarily unavailable. Please retry."
+            ),
+            "code": exc.code,
+        },
     )
 
 
 @app.exception_handler(httpx.HTTPError)
-async def upstream_http_error_handler(_request: Request, _exc: httpx.HTTPError):
+async def upstream_http_error_handler(_request: Request, exc: httpx.HTTPError):
+    LOGGER.warning("Upstream HTTP failure: %s", type(exc).__name__)
     return JSONResponse(
         status_code=503, content={"detail": "An upstream workspace service is unavailable"}
     )
@@ -688,6 +705,7 @@ async def query_knowledge(
     request_id = str(uuid4())
     settings = get_settings()
     timeout = httpx.Timeout(25.0, connect=5.0)
+    fallback_used = False
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -707,13 +725,14 @@ async def query_knowledge(
                 prompt, model_context = prepare_generation_context(request.query, evidence)
                 model_output = await generate_claims(client, settings, prompt)
                 generation_model = model_output.get("_model")
+                fallback_used = model_output.get("_fallback_used") is True
                 result = validate_generation(model_output, model_context)
         except httpx.TimeoutException as exc:
+            LOGGER.warning("Knowledge request timed out [%s]", request_id)
             raise HTTPException(status_code=503, detail="Knowledge service timed out") from exc
         except httpx.HTTPError as exc:
+            LOGGER.warning("Knowledge upstream failed [%s]: %s", request_id, type(exc).__name__)
             raise HTTPException(status_code=503, detail="Knowledge service unavailable") from exc
-        except IntegrationFailure as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     created_at = datetime.now(UTC).isoformat()
     _append_activity(
@@ -737,6 +756,7 @@ async def query_knowledge(
             "evidence_items_sent_to_model": len(model_context),
             "unauthorized_evidence_sent_to_model": 0,
             "generation_model": generation_model,
+            "fallback_used": fallback_used,
         },
     )
 
@@ -785,6 +805,62 @@ async def get_source(
         "source_type": row.get("source_type"),
         "title": row.get("source_name"),
         "source_id": row.get("source_id"),
+        "location": {
+            "page": row.get("page_number"),
+            "row": row.get("row_id"),
+            "image_id": row.get("image_id"),
+            "region": row.get("ocr_region"),
+        },
+        "excerpt": row.get("content", ""),
+    }
+
+
+@app.get("/api/v1/sources/{source_id}/preview", tags=["sources"])
+async def get_source_preview(
+    source_id: Annotated[UUID, ApiPath()],
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Open the first RLS-visible chunk belonging to an authorized source."""
+    settings = get_settings()
+    if not settings.supabase_url or not settings.supabase_publishable_key:
+        raise HTTPException(status_code=503, detail="Source service unavailable")
+
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        access_token = await require_session(client, authorization)
+        try:
+            response = await client.get(
+                f"{settings.supabase_url.rstrip('/')}/rest/v1/knowledge_chunks",
+                params={
+                    "document_id": f"eq.{source_id}",
+                    "select": (
+                        "id,source_type,source_name,source_id,page_number,row_id,image_id,"
+                        "ocr_region,content"
+                    ),
+                    "order": "chunk_index.asc",
+                    "limit": "1",
+                },
+                headers={
+                    "apikey": settings.supabase_publishable_key.get_secret_value(),
+                    "Authorization": f"Bearer {access_token}",
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=503, detail="Source service timed out") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="Source service unavailable") from exc
+
+    if response.is_error:
+        raise HTTPException(status_code=503, detail="Source service unavailable")
+    rows = response.json()
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=404, detail="Source not found")
+    row = rows[0]
+    return {
+        "citation_id": str(row["id"]),
+        "source_type": row.get("source_type"),
+        "title": row.get("source_name"),
+        "source_id": str(source_id),
         "location": {
             "page": row.get("page_number"),
             "row": row.get("row_id"),

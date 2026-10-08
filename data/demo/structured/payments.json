@@ -1,0 +1,15 @@
+{
+  "table": "payments",
+  "records": [
+    {
+      "payment_id": "PMT-ACM-2048-01",
+      "invoice_id": "ACM-INV-2048",
+      "customer_id": "CUST-ACM-1001",
+      "attempted_on": "2026-10-03",
+      "attempted_minor_units": 4800000,
+      "settled_minor_units": 0,
+      "status": "declined",
+      "receipt_id": "RCP-2048"
+    }
+  ]
+}

@@ -12,20 +12,26 @@ branding. Synthetic records are not presented as connected production data.
 - Earlier PS-01 concepts remain in `docs/design/` as historical references;
   they contain branding and sample details that should not be copied.
 
-The Clearframe concept sets a white canvas, deep navy type, one blue accent,
-pale cool-gray separators, a slim top bar, a left navigation rail, an open
-question workspace, and a right evidence inspector. Product UI, citations,
-controls, and text are implemented in code rather than shipped as a screenshot.
+The Clearframe system uses a light or dark canvas, deep ink type, a restrained
+blue accent, cool separators, a slim top bar, a six-destination navigation
+rail, and a full-width Ask workspace. Citations are inline; source evidence
+opens in a temporary drawer rather than occupying a permanent column. Product
+UI, citations, controls, and text are implemented in code rather than shipped
+as a screenshot.
 
 ## Current implemented surface
 
 - Supabase sign-in form and a server-side authenticated route gate.
-- Six workspace destinations: Overview, Ask, Knowledge, Ingestion, Security,
-  and Evaluation.
-- Live query and source lookup controls are connected to the FastAPI contract.
-- Empty/setup states identify database, ingestion, policy-validation, and
-  evaluation work that is not yet connected.
+- Six direct routes: Dashboard, Ask, Sources, Ingest, Security, and Evaluation.
+- The account area at the bottom of the sidebar holds controlled local demo
+  role switching, theme selection, and Log out.
+- The Ask route shows inline citations and opens authorized source excerpts in
+  a responsive evidence drawer.
+- A coherent light/dark token set, focus states, mobile navigation, table
+  overflow, and reduced-motion behavior are implemented. Production browser
+  checks covered 320px mobile and 1440px desktop; tablet and broader device
+  coverage remain unverified.
+- The interface reports live data and safe request failures. Gemini generation
+  was intermittent during the latest browser run; see `REVIEW_NEEDED.md`.
 
-The demo identity switch remains absent until it can switch to actual seeded
-Supabase sessions. A client-side role selector would not establish identity or
-authorization.
+The controlled local demo identity switch uses real seeded Supabase sessions.

@@ -1,0 +1,15 @@
+{
+  "table": "orders",
+  "records": [
+    {
+      "order_id": "PO-8821",
+      "supplier_id": "SUP-NORTHSTAR-01",
+      "supplier": "Northstar Components Ltd.",
+      "project_id": "NVC-ENG-ATLAS",
+      "total_minor_units": 1240000,
+      "currency": "USD",
+      "approved_on": "2026-10-02",
+      "status": "approved"
+    }
+  ]
+}

@@ -15,6 +15,10 @@ GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 class IntegrationFailure(Exception):
     """An upstream provider or database integration failed safely."""
 
+    def __init__(self, message: str, *, code: str = "upstream_unavailable") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 async def verify_supabase_session(
     client: httpx.AsyncClient, settings: Settings, access_token: str
@@ -61,9 +65,12 @@ async def _create_embedding(
     client: httpx.AsyncClient, settings: Settings, input_text: str
 ) -> list[float]:
     if not settings.gemini_api_key:
-        raise IntegrationFailure("Gemini is not configured")
+        raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
     if settings.embedding_dimensions != 1536:
-        raise IntegrationFailure("Gemini dimensions do not match the configured database schema")
+        raise IntegrationFailure(
+            "Gemini dimensions do not match the configured database schema",
+            code="provider_unavailable",
+        )
     model = settings.gemini_embedding_model.removeprefix("models/")
     response = await client.post(
         f"{GEMINI_API_ROOT}/models/{model}:embedContent",
@@ -77,11 +84,13 @@ async def _create_embedding(
         },
     )
     if response.is_error:
-        raise IntegrationFailure("Gemini embedding request failed")
+        raise IntegrationFailure("Gemini embedding request failed", code="provider_unavailable")
     try:
         body = response.json()
     except ValueError as exc:
-        raise IntegrationFailure("Gemini returned an invalid embedding response") from exc
+        raise IntegrationFailure(
+            "Gemini returned an invalid embedding response", code="provider_unavailable"
+        ) from exc
     embedding = body.get("embedding")
     values = embedding.get("values") if isinstance(embedding, dict) else None
     if (
@@ -89,7 +98,9 @@ async def _create_embedding(
         or len(values) != settings.embedding_dimensions
         or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values)
     ):
-        raise IntegrationFailure("Gemini returned an invalid embedding")
+        raise IntegrationFailure(
+            "Gemini returned an invalid embedding", code="provider_unavailable"
+        )
     return [float(value) for value in values]
 
 
@@ -130,7 +141,7 @@ async def generate_claims(
     client: httpx.AsyncClient, settings: Settings, prompt: str
 ) -> dict[str, Any]:
     if not settings.gemini_api_key:
-        raise IntegrationFailure("Gemini is not configured")
+        raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
     models = list(
         dict.fromkeys(
             model.removeprefix("models/")
@@ -139,7 +150,9 @@ async def generate_claims(
         )
     )
     if not models:
-        raise IntegrationFailure("Gemini has no configured generation model")
+        raise IntegrationFailure(
+            "Gemini has no configured generation model", code="provider_unavailable"
+        )
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -169,24 +182,37 @@ async def generate_claims(
     }
     response = None
     used_model = models[0]
+    fallback_used = False
     for model_index, model in enumerate(models):
         used_model = model
-        for attempt in range(3):
+        if model_index > 0:
+            fallback_used = True
+        for attempt in range(2):
             try:
                 response = await client.post(
                     f"{GEMINI_API_ROOT}/models/{model}:generateContent",
                     headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
                     json=payload,
+                    timeout=httpx.Timeout(15.0, connect=5.0),
                 )
             except httpx.TimeoutException as exc:
                 response = None
                 if model_index < len(models) - 1:
                     break
-                raise IntegrationFailure("Gemini generation timed out") from exc
+                raise IntegrationFailure(
+                    "Gemini generation timed out", code="provider_timeout"
+                ) from exc
+            except httpx.TransportError as exc:
+                response = None
+                if model_index < len(models) - 1:
+                    break
+                raise IntegrationFailure(
+                    "Gemini could not be reached", code="provider_unavailable"
+                ) from exc
             transient_failure = response.status_code in {429, 500, 502, 503, 504}
-            if not transient_failure or attempt == 2:
+            if not transient_failure or attempt == 1:
                 break
-            await asyncio.sleep(0.4 * (2**attempt))
+            await asyncio.sleep(0.35)
         if response is None:
             continue
         if not response.is_error or response.status_code not in {429, 500, 502, 503, 504}:
@@ -194,10 +220,11 @@ async def generate_claims(
         if model_index < len(models) - 1:
             continue
     if response is None:
-        raise IntegrationFailure("Gemini generation timed out")
+        raise IntegrationFailure("Gemini generation timed out", code="provider_timeout")
     if response.is_error:
         raise IntegrationFailure(
-            f"Gemini generation is temporarily unavailable (HTTP {response.status_code})"
+            f"Gemini generation is temporarily unavailable (HTTP {response.status_code})",
+            code="provider_unavailable",
         )
     try:
         body = response.json()
@@ -205,8 +232,13 @@ async def generate_claims(
         model_text = candidates[0]["content"]["parts"][0]["text"]
         output = json.loads(model_text)
     except (IndexError, KeyError, TypeError, ValueError) as exc:
-        raise IntegrationFailure("Gemini returned malformed structured output") from exc
+        raise IntegrationFailure(
+            "Gemini returned malformed structured output", code="provider_invalid_response"
+        ) from exc
     if not isinstance(output, dict):
-        raise IntegrationFailure("Gemini returned malformed structured output")
+        raise IntegrationFailure(
+            "Gemini returned malformed structured output", code="provider_invalid_response"
+        )
     output["_model"] = used_model
+    output["_fallback_used"] = fallback_used
     return output

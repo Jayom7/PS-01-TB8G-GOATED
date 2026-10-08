@@ -139,3 +139,32 @@
   attempt, but subsequent requests received Gemini HTTP 503 `UNAVAILABLE`
   (“high demand”). The multi-query answer/citation demo remains incomplete
   until that provider endpoint recovers.
+
+## 2026-10-08 — Final implementation and production browser pass
+
+- Added direct protected routes for Dashboard, Ask, Sources, Ingest, Security,
+  and Evaluation; refreshed local seed corpus to 19 sources, 45 chunks, and 7
+  structured records; and made local role switching exchange actual Auth
+  sessions. Seeded credentials remain only in ignored owner-readable storage.
+- The old local API and Next dev processes served stale code. Restarted only
+  those local runtimes, built the production web bundle, and verified the
+  production server; protected dashboard, all six route destinations, source
+  listing, and authorized source preview worked. Browser auth and CEO-to-HR
+  switching worked; the HR dashboard showed 3 sources/8 chunks/1 record and
+  finance queries returned insufficient evidence.
+- Expanded the local pgTAP suite from 17 to 24 assertions. CEO, Finance, HR,
+  Sales, and Engineer scope tests, source lookup denial, and forged org-claim
+  checks passed. API suite: 32 passed. Ruff, frontend ESLint, TypeScript, and
+  the normal production build passed.
+- Production browser verification at 320px and 1440px included dashboard,
+  routes, sources drawer, dark/light theme, role switch, finance denial, and a
+  user-query prompt-injection denial. Evaluation reported Recall@12 1.000,
+  MRR 0.775, six checks, and zero authorization leaks.
+- One live Gemini scanned-invoice answer succeeded with a validated OCR source
+  citation using the fallback model. Other contract, invoice-status,
+  cross-modal, and document-injection requests hit timeout, malformed output,
+  or unavailable-provider responses. The multi-query AI path is still
+  unstable; citation validation is not semantic claim support.
+- Hosted Supabase remains untouched because the Supabase CLI has no access
+  token. `gh` is unavailable. Do not infer hosted correctness or a GitHub push
+  from local test results.

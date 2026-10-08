@@ -14,10 +14,12 @@
       "hr",
       "sales",
       "engineering",
+      "procurement",
       "security_test"
     ],
     "Finance Manager": [
       "finance",
+      "procurement",
       "security_test"
     ],
     "HR Manager": [
@@ -27,7 +29,8 @@
       "sales"
     ],
     "Engineer": [
-      "engineering"
+      "engineering",
+      "procurement"
     ]
   },
   "sources": [
@@ -73,6 +76,88 @@
       ]
     },
     {
+      "source_id": "FIN-POL-2026-04",
+      "path": "documents/finance/finance-policy-2026.pdf",
+      "category": "finance",
+      "source_type": "pdf",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager"
+      ]
+    },
+    {
+      "source_id": "HR-POL-2026-02",
+      "path": "documents/hr/employee-handbook-2026.pdf",
+      "category": "hr",
+      "source_type": "pdf",
+      "allowed_roles": [
+        "CEO",
+        "HR Manager"
+      ]
+    },
+    {
+      "source_id": "SEC-POL-2026-01",
+      "path": "documents/security/security-policy-2026.pdf",
+      "category": "security_test",
+      "source_type": "pdf",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager"
+      ]
+    },
+    {
+      "source_id": "PRD-ATLAS-2026-10",
+      "path": "documents/product/atlas-gateway-specification.pdf",
+      "category": "engineering",
+      "source_type": "pdf",
+      "allowed_roles": [
+        "CEO",
+        "Engineer"
+      ]
+    },
+    {
+      "source_id": "SUP-NORTHSTAR-2026-11",
+      "path": "documents/procurement/northstar-supplier-agreement.pdf",
+      "category": "procurement",
+      "source_type": "pdf",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager",
+        "Engineer"
+      ]
+    },
+    {
+      "source_id": "PO-8821-SCAN",
+      "path": "documents/procurement/purchase-order-PO-8821.png",
+      "category": "procurement",
+      "source_type": "image_ocr",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager",
+        "Engineer"
+      ]
+    },
+    {
+      "source_id": "RCP-2048-SCAN",
+      "path": "documents/finance/receipt-RCP-2048.png",
+      "category": "finance",
+      "source_type": "image_ocr",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager"
+      ]
+    },
+    {
+      "source_id": "EMP-020-SIGNED",
+      "path": "documents/hr/employee-acknowledgement-EMP-020.png",
+      "category": "hr",
+      "source_type": "image_ocr",
+      "allowed_roles": [
+        "CEO",
+        "HR Manager"
+      ]
+    },
+    {
       "source_id": "nova-finance-records",
       "path": "structured/finance.json",
       "category": "finance",
@@ -109,6 +194,38 @@
       "source_type": "structured",
       "allowed_roles": [
         "CEO",
+        "Engineer"
+      ]
+    },
+    {
+      "source_id": "nova-customer-records",
+      "path": "structured/customers.json",
+      "category": "finance",
+      "source_type": "structured",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager",
+        "Sales Manager"
+      ]
+    },
+    {
+      "source_id": "nova-payment-records",
+      "path": "structured/payments.json",
+      "category": "finance",
+      "source_type": "structured",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager"
+      ]
+    },
+    {
+      "source_id": "nova-order-records",
+      "path": "structured/orders.json",
+      "category": "procurement",
+      "source_type": "structured",
+      "allowed_roles": [
+        "CEO",
+        "Finance Manager",
         "Engineer"
       ]
     }

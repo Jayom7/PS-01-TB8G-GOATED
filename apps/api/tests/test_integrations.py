@@ -81,9 +81,10 @@ async def test_generation_falls_back_after_transient_primary_model_outage(monkey
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, config, "Return no claims.")
 
-    assert calls == ["gemini-3.8-flash"] * 3 + ["gemini-3.6-flash"]
+    assert calls == ["gemini-3.8-flash"] * 2 + ["gemini-3.6-flash"]
     assert output["claims"] == []
     assert output["_model"] == "gemini-3.6-flash"
+    assert output["_fallback_used"] is True
 
 
 @pytest.mark.asyncio
@@ -105,3 +106,25 @@ async def test_generation_falls_back_when_primary_model_times_out() -> None:
 
     assert calls == ["gemini-3.8-flash", "gemini-3.6-flash"]
     assert output["_model"] == "gemini-3.6-flash"
+    assert output["_fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_reports_provider_outage_after_bounded_retries(monkeypatch) -> None:
+    from ps01_api.integrations import IntegrationFailure
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ps01_api.integrations.asyncio.sleep", no_wait)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    config = settings()
+    config.gemini_fallback_chat_model = "gemini-3.6-flash"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, config, "Generate a grounded answer.")
+
+    assert failure.value.code == "provider_unavailable"

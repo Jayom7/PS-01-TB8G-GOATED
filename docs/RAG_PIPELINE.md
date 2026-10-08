@@ -2,15 +2,15 @@
 
 ## Ingestion
 
-1. **Implemented primitive:** PDF and image parsers validate file signatures
+1. **Implemented:** PDF and image parsers validate file signatures
    and size. PDF text extraction records page provenance; blank scanned pages
    and images can use local PaddleOCR with bounded rendering and region
    provenance. Structured records serialize deterministically and retain table
    and row provenance. OCR/PDF and structured-record unit tests pass; PaddleOCR
    was also run on the synthetic invoice scan.
-2. **Still required for a complete ingestion flow:** authenticate the actor,
-   compute checksums, retain originals in private object storage, enforce
-   source ACLs, schedule ingestion, and persist chunks/vectors transactionally.
+2. **Implemented locally:** authenticated CEO-gated ingestion, checksums,
+   private local originals, role grants, and persistence of chunks/vectors.
+   Background jobs and transactional rollback remain unimplemented.
 4. Normalize outputs to `KnowledgeUnit(content, source_type, source_id,
    organization_id, classification, provenance, metadata, access_policy)`.
 5. Chunk with source-aware boundaries and stable source locations. Validate
@@ -38,8 +38,8 @@ HNSW is the initial approximate index candidate. Selective filters can reduce
    returned neighbors; validate pgvector iterative scans and exact-search
 fallback against the installed extension version and representative
 authorization selectivity. The migration has been applied to local Supabase;
-its 17 pgTAP authorization/schema checks pass and local DB lint reports no
-errors. The hosted project has not been migrated or verified.
+24 pgTAP authorization/schema checks pass. The hosted project has not been
+migrated or verified.
 
 ## Grounded generation
 
@@ -74,7 +74,7 @@ Track retrieval relevance/recall on a versioned synthetic set, source-type
 coverage, cross-modal hit rate, citation validity, grounded-answer rate,
 authorized context violations (must be zero in tests), latency, and query
 plans. `apps/api/scripts/evaluate_local_retrieval.py` executes five query cases
-against the local seeded corpus and reports Recall@12, MRR, latency, and
-forbidden-source hits. The current run measured Recall@12 1.0, MRR 0.775, and
-zero authorization violations on this small synthetic set. Treat it as a
-smoke evaluation, not a representative benchmark.
+plus a direct RLS check against the local seeded corpus and reports Recall@12,
+MRR, latency, and forbidden-source hits. The current run measured Recall@12
+1.0, MRR 0.775, and zero authorization violations on this small synthetic
+set. Treat it as a smoke evaluation, not a representative benchmark.

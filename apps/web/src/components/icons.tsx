@@ -2,7 +2,7 @@ import type { ReactNode, SVGProps } from "react";
 
 export type IconName =
   | "chat" | "files" | "table" | "upload" | "chart" | "send" | "paperclip"
-  | "chevron" | "menu" | "close" | "user" | "arrow" | "lock" | "home";
+  | "chevron" | "menu" | "close" | "user" | "arrow" | "lock" | "home" | "search";
 
 const paths: Record<IconName, ReactNode> = {
   chat: <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 2v-5.5A7.5 7.5 0 1 1 20 11.5Z" />,
@@ -19,6 +19,7 @@ const paths: Record<IconName, ReactNode> = {
   arrow: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
   lock: <><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 1 1 8 0v3" /></>,
   home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v11h14V9M9 20v-6h6v6" /></>,
+  search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></>,
 };
 
 export function Icon({

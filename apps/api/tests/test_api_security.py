@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+from ps01_api.integrations import IntegrationFailure
 from ps01_api.main import app
 
 
@@ -111,3 +112,34 @@ class TestApiSecurity:
     def test_source_lookup_requires_a_bearer_session(self) -> None:
         response = self.client.get("/api/v1/sources/11111111-1111-4111-8111-111111111111")
         assert response.status_code == 401
+
+    def test_source_preview_requires_a_bearer_session(self) -> None:
+        response = self.client.get(
+            "/api/v1/sources/11111111-1111-4111-8111-111111111111/preview"
+        )
+        assert response.status_code == 401
+
+    def test_provider_timeout_has_safe_distinct_error_contract(self) -> None:
+        with (
+            patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
+            patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
+            patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
+            patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
+        ):
+            auth.return_value = {"id": "trusted-session-user"}
+            embed.return_value = [0.0] * 1536
+            retrieve.return_value = [{"chunk_id": "authorized", "content": "evidence"}]
+            generate.side_effect = IntegrationFailure(
+                "Gemini generation timed out", code="provider_timeout"
+            )
+            response = self.client.post(
+                "/api/v1/chat/query",
+                headers={"Authorization": "Bearer trusted-session-token"},
+                json={"query": "Summarize the available evidence."},
+            )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "The answer service took too long to respond. Please try again.",
+            "code": "provider_timeout",
+        }

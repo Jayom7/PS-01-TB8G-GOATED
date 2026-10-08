@@ -156,6 +156,21 @@ def extract_image_ocr(
     width, height = _image_dimensions(path)
     if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
         raise IngestionError(f"Image dimensions must not exceed {MAX_IMAGE_PIXELS:,} pixels")
+    try:
+        import pymupdf
+
+        decoded = pymupdf.Pixmap(path)
+        if (
+            decoded.width != width
+            or decoded.height != height
+            or decoded.width * decoded.height > MAX_IMAGE_PIXELS
+        ):
+            raise IngestionError("Decoded image dimensions do not match the bounded header")
+        del decoded
+    except IngestionError:
+        raise
+    except Exception as exc:
+        raise IngestionError("Image pixels could not be decoded safely") from exc
     if engine is None:
         engine = _create_ocr_engine()
 
@@ -307,7 +322,7 @@ def structured_record_candidates(
             content=chunk,
             chunk_index=chunk_index + offset,
             row_id=row_id,
-            metadata={"table": table_name},
+            metadata={"table": table_name, "fields": fields},
         )
         for offset, chunk in enumerate(text_chunks)
     ]

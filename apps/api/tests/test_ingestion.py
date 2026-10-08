@@ -98,7 +98,7 @@ def test_scanned_pdf_page_uses_ocr_and_keeps_page_and_region(tmp_path: Path) -> 
 
 def test_image_ocr_keeps_image_id_and_regions(tmp_path: Path) -> None:
     image_path = tmp_path / "invoice.png"
-    image_path.write_bytes(make_png_header(100, 80) + b"synthetic image bytes")
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 100, 80), False).save(image_path)
     engine = FakeOcrEngine()
 
     chunks = extract_image_ocr(image_path, "image-invoice-2048", engine=engine)
@@ -123,7 +123,7 @@ def test_image_rejects_excessive_pixel_count_before_ocr(tmp_path: Path) -> None:
 
 def test_jpeg_header_dimensions_are_read_before_ocr(tmp_path: Path) -> None:
     image_path = tmp_path / "invoice.jpg"
-    image_path.write_bytes(make_jpeg_header(100, 80))
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 100, 80), False).save(image_path)
     engine = FakeOcrEngine()
 
     chunks = extract_image_ocr(image_path, "jpeg-invoice", engine=engine)
@@ -165,7 +165,7 @@ def test_structured_source_can_keep_document_id_separate_from_table_name() -> No
     )
 
     assert chunks[0].source_id == "nova-finance-records"
-    assert chunks[0].metadata == {"table": "invoices"}
+    assert chunks[0].metadata == {"table": "invoices", "fields": {"status": "unpaid"}}
 
 
 def test_structured_record_large_fields_are_chunked_without_dropping_data() -> None:
@@ -181,3 +181,12 @@ def test_structured_record_large_fields_are_chunked_without_dropping_data() -> N
     assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
     assert all(chunk.row_id == "INV-2048" for chunk in chunks)
     assert "Payment detail" in " ".join(chunk.content for chunk in chunks)
+
+
+def test_header_only_image_is_rejected_before_ocr(tmp_path):
+    path = tmp_path / "malformed.png"
+    path.write_bytes(make_png_header(100, 80))
+    engine = FakeOcrEngine()
+    with pytest.raises(IngestionError, match="decoded"):
+        extract_image_ocr(path, "malformed", engine=engine)
+    assert engine.inputs == []

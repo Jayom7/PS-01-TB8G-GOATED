@@ -21,6 +21,7 @@ from ps01_api.ingestion import (
     structured_record_candidates,
 )
 from ps01_api.integrations import create_document_embedding
+from ps01_api.records import RECORD_KEYS, record_excerpt, validate_record
 
 ROOT = Path(__file__).resolve().parents[3]
 CORPUS = ROOT / "data" / "demo"
@@ -219,7 +220,7 @@ def seed_users(
     return users
 
 
-def collect_candidates() -> list[tuple[dict[str, object], ChunkCandidate]]:
+def collect_candidates(database_records=None) -> list[tuple[dict[str, object], ChunkCandidate]]:
     manifest = json.loads(MANIFEST.read_text())
     output: list[tuple[dict[str, object], ChunkCandidate]] = []
     for source in manifest["sources"]:
@@ -230,7 +231,7 @@ def collect_candidates() -> list[tuple[dict[str, object], ChunkCandidate]]:
         elif source["source_type"] == "image_ocr":
             candidates = extract_image_ocr(path, source_id)
         else:
-            structured = json.loads(path.read_text())
+            structured = (database_records or {}).get(source_id) or json.loads(path.read_text())
             candidates = []
             for record in structured["records"]:
                 row_id = str(next(iter(record.values())))
@@ -239,7 +240,7 @@ def collect_candidates() -> list[tuple[dict[str, object], ChunkCandidate]]:
                     structured_record_candidates(
                         table_name=structured["table"],
                         row_id=row_id,
-                        source_name=path.name,
+                        source_name=f"{structured['table']} / {row_id}",
                         fields=fields,
                         source_id=source_id,
                     )
@@ -272,10 +273,18 @@ async def main() -> None:
             base_url,
             service_key,
             "organizations",
-            params={"name": "eq.NovaCore Systems", "select": "id"},
+            params={"name": "in.(NovaCore Industries,NovaCore Systems)", "select": "id,name"},
         )
         if org_rows:
             org_id = str(org_rows[0]["id"])
+            if org_rows[0]["name"] != "NovaCore Industries":
+                renamed = client.patch(
+                    f"{base_url}/rest/v1/organizations",
+                    headers=rest_headers(service_key),
+                    params={"id": f"eq.{org_id}"},
+                    json={"name": "NovaCore Industries"},
+                )
+                renamed.raise_for_status()
         else:
             org_id = str(
                 write_rows(
@@ -283,7 +292,7 @@ async def main() -> None:
                     base_url,
                     service_key,
                     "organizations",
-                    [{"name": "NovaCore Systems"}],
+                    [{"name": "NovaCore Industries"}],
                 )[0]["id"]
             )
 
@@ -341,7 +350,14 @@ async def main() -> None:
                     "select": "id,content_hash,metadata",
                 },
             )
+            source_name = path.name
+            record_metadata = {}
+            if source["source_type"] == "structured":
+                fixture = json.loads(path.read_text())
+                source_name = f"{fixture['table'].replace('_', ' ').title()} records"
+                record_metadata = {"table": fixture["table"]}
             document_metadata = {
+                **record_metadata,
                 "category": source["category"],
                 "chunk_count": source_chunk_counts[source["source_id"]],
                 "local_demo_path": local_path,
@@ -357,7 +373,7 @@ async def main() -> None:
                         params={"id": f"eq.{document_id}"},
                         json={
                             "source_type": source["source_type"],
-                            "source_name": path.name,
+                            "source_name": source_name,
                             "content_hash": content_hash,
                             "storage_path": None,
                             "metadata": document_metadata,
@@ -378,7 +394,7 @@ async def main() -> None:
                         headers=rest_headers(service_key)
                         | {"Content-Type": "application/json", "Prefer": "return=minimal"},
                         params={"id": f"eq.{document_id}"},
-                        json={"metadata": document_metadata},
+                        json={"metadata": document_metadata, "source_name": source_name},
                     )
                     updated.raise_for_status()
             else:
@@ -407,7 +423,7 @@ async def main() -> None:
                         {
                             "organization_id": org_id,
                             "source_type": source["source_type"],
-                            "source_name": path.name,
+                            "source_name": source_name,
                             "content_hash": content_hash,
                             "metadata": document_metadata,
                             "created_by": users["CEO"],
@@ -418,15 +434,93 @@ async def main() -> None:
                 refresh_source_ids.add(source["source_id"])
             source_documents[source["source_id"]] = document_id
 
+        # Seed relational rows in foreign-key order, then read PostgreSQL back
+        # before generating canonical index text. Fixtures are seed inputs only.
+        database_records = {}
+        for table, primary_key in RECORD_KEYS.items():
+            for source in manifest["sources"]:
+                if source["source_type"] != "structured":
+                    continue
+                fixture = json.loads((CORPUS / source["path"]).read_text())
+                if fixture["table"] != table:
+                    continue
+                document_id = source_documents[source["source_id"]]
+                for fields in fixture["records"]:
+                    validate_record(table, str(fields[primary_key]), fields)
+                write_rows(
+                    client,
+                    base_url,
+                    service_key,
+                    table,
+                    [
+                        {**fields, "organization_id": org_id, "document_id": document_id}
+                        for fields in fixture["records"]
+                    ],
+                    on_conflict=f"organization_id,{primary_key}",
+                )
+                persisted = request_rows(
+                    client,
+                    base_url,
+                    service_key,
+                    "structured_records",
+                    params={"document_id": f"eq.{document_id}", "select": "fields"},
+                )
+                database_records[source["source_id"]] = {
+                    "table": table,
+                    "records": [row["fields"] for row in persisted],
+                }
+                # Upgrade legacy fixture-only chunks even if file hashes match.
+                existing = request_rows(
+                    client,
+                    base_url,
+                    service_key,
+                    "knowledge_chunks",
+                    params={"document_id": f"eq.{document_id}", "select": "metadata"},
+                )
+                if not existing or any(
+                    not row.get("metadata", {}).get("fields") for row in existing
+                ):
+                    refresh_source_ids.add(source["source_id"])
+                    response = client.delete(
+                        f"{base_url}/rest/v1/knowledge_chunks",
+                        headers=rest_headers(service_key),
+                        params={"document_id": f"eq.{document_id}"},
+                    )
+                    response.raise_for_status()
+        candidates = collect_candidates(database_records)
+        candidates = [
+            (
+                source,
+                ChunkCandidate(
+                    **{
+                        **candidate.__dict__,
+                        "content": record_excerpt(
+                            candidate.metadata["table"],
+                            candidate.row_id,
+                            candidate.metadata["fields"],
+                        ),
+                    }
+                ),
+            )
+            if candidate.source_type == "structured"
+            else (source, candidate)
+            for source, candidate in candidates
+        ]
         candidates_to_embed = [
             (source, candidate)
             for source, candidate in candidates
             if source["source_id"] in refresh_source_ids
         ]
+        semaphore = asyncio.Semaphore(3)
+
+        async def bounded_embedding(embedding_client, candidate):
+            async with semaphore:
+                return await embed_candidate(embedding_client, settings, candidate)
+
         async with httpx.AsyncClient(timeout=35.0) as embedding_client:
             vectors = await asyncio.gather(
                 *(
-                    embed_candidate(embedding_client, settings, candidate)
+                    bounded_embedding(embedding_client, candidate)
                     for _, candidate in candidates_to_embed
                 )
             )

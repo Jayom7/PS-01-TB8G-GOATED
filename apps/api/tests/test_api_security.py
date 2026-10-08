@@ -56,11 +56,7 @@ class TestApiSecurity:
             return {
                 "claims": [
                     {
-                        "text": "Invoice INV-2048 is USD 48,000.",
-                        "citation_ids": [authorized["chunk_id"]],
-                        "supporting_quotes": [
-                            {"citation_id": authorized["chunk_id"], "quote": authorized["content"]}
-                        ],
+                        "evidence_ids": [f"{authorized['chunk_id']}:0"],
                     }
                 ]
             }
@@ -71,6 +67,7 @@ class TestApiSecurity:
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate_mock,
+            patch("ps01_api.main._save_history", new_callable=AsyncMock, return_value=True),
         ):
             auth.return_value = {"id": "trusted-session-user"}
             identity.return_value = {
@@ -106,6 +103,7 @@ class TestApiSecurity:
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
+            patch("ps01_api.main._save_history", new_callable=AsyncMock, return_value=True),
         ):
             auth.return_value = {"id": "trusted-session-user"}
             identity.return_value = {
@@ -144,6 +142,7 @@ class TestApiSecurity:
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
+            patch("ps01_api.main._save_history", new_callable=AsyncMock, return_value=True),
         ):
             auth.return_value = {"id": "trusted-session-user"}
             identity.return_value = {
@@ -153,7 +152,14 @@ class TestApiSecurity:
                 "roles": ["CEO"],
             }
             embed.return_value = [0.0] * 1536
-            retrieve.return_value = [{"chunk_id": "authorized", "content": "evidence"}]
+            retrieve.return_value = [
+                {
+                    "chunk_id": "authorized",
+                    "content": "evidence",
+                    "source_type": "pdf",
+                    "page_number": 1,
+                }
+            ]
             generate.side_effect = IntegrationFailure(
                 "Gemini generation timed out", code="provider_timeout"
             )
@@ -177,6 +183,7 @@ class TestApiSecurity:
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
+            patch("ps01_api.main._save_history", new_callable=AsyncMock, return_value=True),
         ):
             auth.return_value = {"id": "trusted-session-user"}
             identity.return_value = {
@@ -186,7 +193,14 @@ class TestApiSecurity:
                 "roles": ["CEO"],
             }
             embed.return_value = [0.0] * 1536
-            retrieve.return_value = [{"chunk_id": "authorized", "content": "evidence"}]
+            retrieve.return_value = [
+                {
+                    "chunk_id": "authorized",
+                    "content": "evidence",
+                    "source_type": "pdf",
+                    "page_number": 1,
+                }
+            ]
             generate.side_effect = IntegrationFailure(
                 "Gemini rate limited", code="provider_rate_limited"
             )
@@ -225,7 +239,14 @@ class TestApiSecurity:
         embed.assert_not_awaited()
 
     def test_ingestion_rejects_unsupported_file_type(self) -> None:
-        with patch("ps01_api.main._local_demo_enabled", return_value=True):
+        with (
+            patch("ps01_api.main._local_demo_enabled", return_value=True),
+            patch(
+                "ps01_api.main.require_local_ceo",
+                new_callable=AsyncMock,
+                return_value=("token", {}),
+            ),
+        ):
             response = self.client.post(
                 "/api/v1/ingest/file",
                 headers={"X-Source-Name": "notes.txt"},

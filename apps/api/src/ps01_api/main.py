@@ -6,6 +6,7 @@ import json
 import logging
 import runpy
 import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -16,7 +17,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi import Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import get_settings
@@ -35,7 +36,13 @@ from .integrations import (
     retrieve_chunks,
     verify_supabase_session,
 )
-from .rag import insufficient_evidence, prepare_generation_context, validate_generation
+from .rag import (
+    citation_from_row,
+    insufficient_evidence,
+    prepare_generation_context,
+    validate_generation,
+)
+from .records import record_excerpt, validate_record
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 LOGGER = logging.getLogger("ps01_api")
@@ -44,7 +51,27 @@ DEMO_ROLES = ("CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer
 EVALUATION_RESULTS = REPOSITORY_ROOT / "data" / "local" / "evaluation.json"
 PRIVATE_INGESTION = REPOSITORY_ROOT / "data" / "private" / "ingest"
 
+
+@asynccontextmanager
+async def lifespan(application):
+    async with request_client() as client:
+        application.state.http_client = client
+        yield
+    application.state.http_client = None
+
+
+@asynccontextmanager
+async def request_client():
+    client = getattr(app.state, "http_client", None)
+    if client is not None:
+        yield client
+    else:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as temporary:
+            yield temporary
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Clearframe Knowledge API",
     version="0.2.0",
     description="Authenticated API for a multi-modal knowledge workspace.",
@@ -53,7 +80,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[get_settings().web_origin],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=[
         "Authorization",
         "Content-Type",
@@ -102,10 +129,12 @@ class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     query: str = Field(min_length=1, max_length=2_000)
+    conversation_id: UUID | None = None
 
 
 class QueryResponse(BaseModel):
     request_id: str
+    conversation_id: str | None = None
     state: str
     claims: list[dict[str, object]]
     trace: dict[str, object]
@@ -321,8 +350,7 @@ async def workspace_summary(
 ) -> dict[str, object]:
     settings = get_settings()
     token = bearer_token(authorization)
-    timeout = httpx.Timeout(12.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with request_client() as client:
         identity = await _identity(client, settings, token)
         context_token, active_role = await _context_token(
             client, settings, token, identity, demo_role
@@ -372,7 +400,11 @@ async def workspace_summary(
             raise HTTPException(status_code=503, detail="Authorized source list is unavailable")
         content_range = chunks_response.headers.get("content-range", "*/0").rsplit("/", 1)[-1]
         chunk_count = int(content_range) if content_range.isdigit() else 0
-    recent = _activity_for(str(identity["user_id"]))
+    recent = [
+        entry
+        for entry in _activity_for(str(identity["user_id"]))
+        if entry.get("active_role") == active_role
+    ]
     latest_evaluation_status = "not run"
     if EVALUATION_RESULTS.is_file():
         try:
@@ -427,7 +459,7 @@ async def security_status(
 ) -> dict[str, object]:
     settings = get_settings()
     token = bearer_token(authorization)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    async with request_client() as client:
         identity = await _identity(client, settings, token)
         _, active_role = await _context_token(client, settings, token, identity, demo_role)
     trace = [
@@ -442,6 +474,7 @@ async def security_status(
             else "no authorized evidence",
         }
         for item in _activity_for(str(identity["user_id"]))
+        if item.get("active_role") == active_role
     ]
     return {
         "identity": identity,
@@ -479,10 +512,12 @@ async def get_evaluation(
     demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+    async with request_client() as client:
         token = await require_session(client, authorization)
         identity = await _identity(client, settings, token)
-        await _context_token(client, settings, token, identity, demo_role)
+        _, role = await _context_token(client, settings, token, identity, demo_role)
+    if role != "CEO" or not _local_demo_enabled():
+        return {"state": "restricted", "result": None}
     if EVALUATION_RESULTS.is_file():
         try:
             result = json.loads(EVALUATION_RESULTS.read_text())
@@ -551,7 +586,7 @@ async def switch_demo_user(
 ) -> dict[str, object]:
     if request.role not in DEMO_ROLES or not _local_demo_enabled():
         raise HTTPException(status_code=404, detail="Local demo user switching is unavailable")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    async with request_client() as client:
         actor_token = bearer_token(authorization)
         settings = get_settings()
         actor_identity = await _identity(client, settings, actor_token)
@@ -592,17 +627,6 @@ async def _store_ingested(
     if role_response.is_error or not role_response.json():
         raise HTTPException(status_code=503, detail="The selected access role is unavailable")
     role_id = str(role_response.json()[0]["id"])
-    semaphore = asyncio.Semaphore(3)
-
-    async def embed(candidate):
-        async with semaphore:
-            return await create_document_embedding(client, settings, source_name, candidate.content)
-
-    try:
-        embeddings = await asyncio.gather(*(embed(candidate) for candidate in candidates))
-    except IntegrationFailure as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
     doc_headers = admin_headers | {
         "Content-Type": "application/json",
         "Prefer": "return=representation",
@@ -614,7 +638,11 @@ async def _store_ingested(
         "source_name": source_name,
         "storage_path": storage_path,
         "content_hash": content_hash,
-        "metadata": {"ingestion": "local-demo", "chunk_count": len(candidates)},
+        "metadata": {
+            "ingestion": "local-demo",
+            "chunk_count": len(candidates),
+            **({"table": candidates[0].metadata["table"]} if source_type == "structured" else {}),
+        },
         "created_by": str(identity["user_id"]),
     }
     document_response = await client.post(
@@ -625,6 +653,62 @@ async def _store_ingested(
             status_code=409 if document_response.status_code == 409 else 503,
             detail="Document could not be indexed",
         )
+    if source_type == "structured":
+        fields = candidates[0].metadata["fields"]
+        table = candidates[0].metadata["table"]
+        row_response = await client.post(
+            f"{base}/{table}",
+            headers=doc_headers,
+            json=[
+                {
+                    **fields,
+                    "organization_id": organization_id,
+                    "document_id": source_id,
+                }
+            ],
+        )
+        if row_response.is_error:
+            await client.delete(
+                f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Record violates the table contract. "
+                    "Check required fields, references, and business key."
+                ),
+            )
+        persisted = row_response.json()[0]
+        fields = {
+            key: value
+            for key, value in persisted.items()
+            if key not in {"organization_id", "document_id"}
+        }
+        candidates = [
+            type(candidate)(
+                **{
+                    **candidate.__dict__,
+                    "content": record_excerpt(table, candidate.row_id, fields),
+                    "metadata": {"table": table, "fields": fields},
+                }
+            )
+            for candidate in candidates
+        ]
+    semaphore = asyncio.Semaphore(3)
+
+    async def embed(candidate):
+        async with semaphore:
+            return await create_document_embedding(client, settings, source_name, candidate.content)
+
+    try:
+        embeddings = await asyncio.gather(*(embed(candidate) for candidate in candidates))
+    except (IntegrationFailure, httpx.HTTPError) as exc:
+        await client.delete(
+            f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
+        )
+        raise HTTPException(
+            status_code=503, detail="Embedding failed; the source was not published"
+        ) from exc
     chunk_payload = []
     for candidate, embedding in zip(candidates, embeddings, strict=True):
         chunk_payload.append(
@@ -662,6 +746,23 @@ async def _store_ingested(
             "can_read": True,
         }
     ]
+    if access_role != "CEO":
+        ceo = await client.get(
+            f"{base}/roles",
+            headers=admin_headers,
+            params={
+                "organization_id": f"eq.{organization_id}",
+                "name": "eq.CEO",
+                "select": "id",
+                "limit": "1",
+            },
+        )
+        if ceo.is_error or not ceo.json():
+            await client.delete(
+                f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
+            )
+            raise HTTPException(status_code=503, detail="CEO access policy is unavailable")
+        grants.append({**grants[0], "principal_id": ceo.json()[0]["id"]})
     grant_response = await client.post(f"{base}/access_grants", headers=doc_headers, json=grants)
     if grant_response.is_error:
         await client.delete(
@@ -688,6 +789,8 @@ async def ingest_file(
     settings = get_settings()
     if not _local_demo_enabled() or not settings.supabase_secret_key:
         raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as auth_client:
+        _, identity = await require_local_ceo(auth_client, authorization, demo_role)
     raw_name = unquote(source_name)
     safe_name = Path(raw_name.replace("\\", "/")).name
     if (
@@ -714,7 +817,6 @@ async def ingest_file(
     stored_path.chmod(0o600)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
-            _, identity = await require_local_ceo(client, authorization, demo_role)
             try:
                 candidates = await asyncio.to_thread(
                     extract_pdf if suffix == ".pdf" else extract_image_ocr,
@@ -761,6 +863,7 @@ async def ingest_structured(
         raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
     source_id = str(uuid4())
     try:
+        validate_record(request.table, request.row_id, request.fields)
         candidates = structured_record_candidates(
             table_name=request.table,
             row_id=request.row_id,
@@ -794,7 +897,7 @@ async def run_evaluation(
 ) -> dict[str, object]:
     if not _local_demo_enabled():
         raise HTTPException(status_code=404, detail="Local evaluation is unavailable")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    async with request_client() as client:
         await require_local_ceo(client, authorization, demo_role)
     try:
         module = runpy.run_path(
@@ -823,11 +926,19 @@ async def query_knowledge(
     authorization: str | None = Header(default=None),
     demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> QueryResponse:
+    return await _run_query(request, authorization, demo_role)
+
+
+async def _run_query(request, authorization, demo_role, emit=None, verified=None):
+    async def progress(stage, **details):
+        if emit:
+            await emit({"stage": stage, **details})
+
     request_id = str(uuid4())
     settings = get_settings()
-    timeout = httpx.Timeout(25.0, connect=5.0)
     fallback_used = False
-    request_started = time.perf_counter()
+    request_started = verified[3] if verified else time.perf_counter()
+    preliminary_auth_ms = (time.perf_counter() - request_started) * 1000 if verified else 0
     timings: dict[str, float | None] = {
         "auth_session_ms": 0.0,
         "embedding_ms": 0.0,
@@ -837,17 +948,36 @@ async def query_knowledge(
         "citation_validation_ms": 0.0,
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with request_client() as client:
         try:
             auth_started = time.perf_counter()
             try:
+                await progress("checking_access")
                 actor_token = bearer_token(authorization)
-                identity = await _identity(client, settings, actor_token)
-                access_token, active_role = await _context_token(
-                    client, settings, actor_token, identity, demo_role
-                )
+                if verified:
+                    identity, access_token, active_role = verified[:3]
+                else:
+                    identity = await _identity(client, settings, actor_token)
+                    access_token, active_role = await _context_token(
+                        client, settings, actor_token, identity, demo_role
+                    )
+                if request.conversation_id:
+                    rows = await _history_rows(
+                        client,
+                        settings,
+                        actor_token,
+                        identity,
+                        active_role,
+                        conversation_id=str(request.conversation_id),
+                    )
+                    if not rows:
+                        raise HTTPException(status_code=404, detail="Conversation not found")
+                await progress("access_checked")
             finally:
-                timings["auth_session_ms"] = round((time.perf_counter() - auth_started) * 1000, 1)
+                timings["auth_session_ms"] = round(
+                    preliminary_auth_ms + (time.perf_counter() - auth_started) * 1000, 1
+                )
+            await progress("searching_knowledge")
             embedding_started = time.perf_counter()
             try:
                 embedding = await create_embedding(client, settings, request.query)
@@ -862,12 +992,15 @@ async def query_knowledge(
                 timings["retrieval_and_ranking_ms"] = round(
                     (time.perf_counter() - retrieval_started) * 1000, 1
                 )
-            if not evidence:
+            await progress("retrieval_complete", evidence_count=len(evidence))
+            prompt, model_context = prepare_generation_context(request.query, evidence)
+            if not model_context:
                 result = insufficient_evidence()
                 model_context: list[dict[str, object]] = []
                 generation_model = None
             else:
-                prompt, model_context = prepare_generation_context(request.query, evidence)
+                await progress("evidence_selected", evidence_count=len(model_context))
+                await progress("generating_response")
                 generation_started = time.perf_counter()
                 try:
                     model_output = await generate_claims(client, settings, prompt)
@@ -877,6 +1010,7 @@ async def query_knowledge(
                     )
                 generation_model = model_output.get("_model")
                 fallback_used = model_output.get("_fallback_used") is True
+                await progress("validating_citations")
                 validation_started = time.perf_counter()
                 result = validate_generation(model_output, model_context)
                 timings["citation_validation_ms"] = round(
@@ -914,8 +1048,11 @@ async def query_knowledge(
         }
     )
 
-    return QueryResponse(
+    conversation_id = str(request.conversation_id or uuid4())
+    await progress("validation_complete", state=result["state"])
+    response = QueryResponse(
         request_id=request_id,
+        conversation_id=conversation_id,
         state=result["state"],
         claims=result["claims"],
         trace={
@@ -933,6 +1070,16 @@ async def query_knowledge(
             ),
         },
     )
+    history_started = time.perf_counter()
+    saved = await _save_history(actor_token, identity, active_role, request.query, response)
+    response.trace["history_saved"] = saved
+    response.trace["timing_ms"]["history_persistence_ms"] = round(
+        (time.perf_counter() - history_started) * 1000, 1
+    )
+    response.trace["timing_ms"]["total_ms"] = round(
+        (time.perf_counter() - request_started) * 1000, 1
+    )
+    return response
 
 
 @app.get("/api/v1/sources/{source_id}", tags=["sources"])
@@ -945,8 +1092,7 @@ async def get_source(
     if not settings.supabase_url or not settings.supabase_publishable_key:
         raise HTTPException(status_code=503, detail="Source service unavailable")
 
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with request_client() as client:
         actor_token = await require_session(client, authorization)
         identity = await _identity(client, settings, actor_token)
         access_token, _ = await _context_token(client, settings, actor_token, identity, demo_role)
@@ -957,7 +1103,7 @@ async def get_source(
                     "id": f"eq.{source_id}",
                     "select": (
                         "id,source_type,source_name,source_id,page_number,row_id,image_id,"
-                        "ocr_region,content"
+                        "ocr_region,content,document_id,metadata"
                     ),
                     "limit": "1",
                 },
@@ -976,20 +1122,7 @@ async def get_source(
     rows = response.json()
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=404, detail="Source not found")
-    row = rows[0]
-    return {
-        "citation_id": str(row["id"]),
-        "source_type": row.get("source_type"),
-        "title": row.get("source_name"),
-        "source_id": row.get("source_id"),
-        "location": {
-            "page": row.get("page_number"),
-            "row": row.get("row_id"),
-            "image_id": row.get("image_id"),
-            "region": row.get("ocr_region"),
-        },
-        "excerpt": row.get("content", ""),
-    }
+    return await _source_payload(rows[0], authorization, demo_role)
 
 
 @app.get("/api/v1/sources/{source_id}/preview", tags=["sources"])
@@ -1003,8 +1136,7 @@ async def get_source_preview(
     if not settings.supabase_url or not settings.supabase_publishable_key:
         raise HTTPException(status_code=503, detail="Source service unavailable")
 
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with request_client() as client:
         actor_token = await require_session(client, authorization)
         identity = await _identity(client, settings, actor_token)
         access_token, _ = await _context_token(client, settings, actor_token, identity, demo_role)
@@ -1015,7 +1147,7 @@ async def get_source_preview(
                     "document_id": f"eq.{source_id}",
                     "select": (
                         "id,source_type,source_name,source_id,page_number,row_id,image_id,"
-                        "ocr_region,content"
+                        "ocr_region,content,document_id,metadata"
                     ),
                     "order": "chunk_index.asc",
                     "limit": "1",
@@ -1035,17 +1167,317 @@ async def get_source_preview(
     rows = response.json()
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=404, detail="Source not found")
-    row = rows[0]
+    return await _source_payload(rows[0], authorization, demo_role)
+
+
+async def _source_payload(row, authorization, demo_role):
+    citation = citation_from_row({**row, "chunk_id": row["id"]})
     return {
-        "citation_id": str(row["id"]),
-        "source_type": row.get("source_type"),
-        "title": row.get("source_name"),
-        "source_id": str(source_id),
-        "location": {
-            "page": row.get("page_number"),
-            "row": row.get("row_id"),
-            "image_id": row.get("image_id"),
-            "region": row.get("ocr_region"),
-        },
+        **citation,
+        "source_id": row.get("source_id"),
         "excerpt": row.get("content", ""),
+        "record_fields": (row.get("metadata") or {}).get("fields"),
+        "preview_path": f"/api/v1/sources/{row['document_id']}/original"
+        if row.get("source_type") in {"pdf", "image_ocr"}
+        else None,
+        "access": "Available within your current authorization scope",
     }
+
+
+@app.get("/api/v1/sources/{source_id}/original", tags=["sources"])
+async def source_original(
+    source_id: Annotated[UUID, ApiPath()],
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    # A whole file requires a document-level grant. A chunk-only grant cannot
+    # expose siblings, and structured fixtures are never returned as originals.
+    settings = get_settings()
+    if not _local_demo_enabled():
+        raise HTTPException(status_code=404, detail="Source not found")
+    async with request_client() as client:
+        actor_token = bearer_token(authorization)
+        identity = await _identity(client, settings, actor_token)
+        token, _ = await _context_token(client, settings, actor_token, identity, demo_role)
+        response = await _rest_rows(
+            client,
+            settings,
+            token,
+            "documents",
+            params={
+                "id": f"eq.{source_id}",
+                "select": "id,source_type,storage_path,metadata",
+                "limit": "1",
+            },
+        )
+    rows = response.json()
+    if not rows or rows[0]["source_type"] not in {"pdf", "image_ocr"}:
+        raise HTTPException(status_code=404, detail="Source not found")
+    doc = rows[0]
+    path = original_path(doc)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Source not found")
+    media = (
+        "application/pdf"
+        if doc["source_type"] == "pdf"
+        else "image/png"
+        if path.suffix.lower() == ".png"
+        else "image/jpeg"
+    )
+    return FileResponse(
+        path,
+        media_type=media,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+def original_path(doc):
+    metadata = doc.get("metadata") or {}
+    if metadata.get("synthetic") is True and metadata.get("local_demo_path"):
+        base = (REPOSITORY_ROOT / "data/demo").resolve()
+        path = (base / metadata["local_demo_path"]).resolve()
+    elif doc.get("storage_path"):
+        base = PRIVATE_INGESTION.resolve()
+        path = (REPOSITORY_ROOT / doc["storage_path"]).resolve()
+    else:
+        return None
+    return (
+        path
+        if path.is_relative_to(base) and path.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg"}
+        else None
+    )
+
+
+@app.post("/api/v1/chat/stream", tags=["chat"])
+async def stream_query(
+    request: QueryRequest,
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    request_started = time.perf_counter()
+    # Authenticate and validate role before opening the stream. No raw generation
+    # deltas are exposed: factual text is released only after citation validation.
+    settings = get_settings()
+    async with request_client() as client:
+        token = bearer_token(authorization)
+        identity = await _identity(client, settings, token)
+        scoped_token, active_role = await _context_token(
+            client, settings, token, identity, demo_role
+        )
+
+    async def events():
+        queue = asyncio.Queue()
+        task = asyncio.create_task(
+            _run_query(
+                request,
+                authorization,
+                demo_role,
+                queue.put,
+                (identity, scoped_token, active_role, request_started),
+            )
+        )
+        try:
+            while not task.done() or not queue.empty():
+                try:
+                    update = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    yield f"event: progress\ndata: {json.dumps(update)}\n\n"
+                except TimeoutError:
+                    continue
+            result = await task
+            yield f"event: result\ndata: {result.model_dump_json()}\n\n"
+        except (IntegrationFailure, HTTPException) as exc:
+            code = exc.code if isinstance(exc, IntegrationFailure) else "request_failed"
+            error = {
+                "code": code,
+                "detail": "No unvalidated answer was released. Please retry later.",
+            }
+            yield f"event: error\ndata: {json.dumps(error)}\n\n"
+        except httpx.HTTPError:
+            yield (
+                'event: error\ndata: {"code":"upstream_unavailable",'
+                '"detail":"Workspace service unavailable."}\n\n'
+            )
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, IntegrationFailure, HTTPException, httpx.HTTPError):
+                pass
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _history_rows(client, settings, token, identity, role, conversation_id=None):
+    params = {
+        "user_id": f"eq.{identity['user_id']}",
+        "organization_id": f"eq.{identity['organization_id']}",
+        "active_role": f"eq.{role}",
+        "deleted_at": "is.null",
+        "select": "id,conversation_id,query,response,created_at",
+        "order": "created_at.desc",
+        "limit": "200",
+    }
+    if conversation_id:
+        params["conversation_id"] = f"eq.{conversation_id}"
+    response = await _rest_rows(client, settings, token, "query_history", params=params)
+    return list(reversed(response.json()))
+
+
+async def _save_history(token, identity, role, query, response):
+    settings = get_settings()
+    try:
+        async with request_client() as client:
+            saved = await client.post(
+                f"{settings.supabase_url.rstrip('/')}/rest/v1/query_history",
+                headers=_rest_headers(settings, token),
+                json={
+                    "id": response.request_id,
+                    "conversation_id": response.conversation_id,
+                    "user_id": identity["user_id"],
+                    "organization_id": identity["organization_id"],
+                    "active_role": role,
+                    "query": query,
+                    "response": response.model_dump(),
+                },
+            )
+        if saved.is_error:
+            LOGGER.warning("History persistence unavailable: HTTP %s", saved.status_code)
+        return not saved.is_error
+    except (httpx.HTTPError, IntegrationFailure, AttributeError):
+        LOGGER.warning("History persistence unavailable")
+        return False
+
+
+@app.get("/api/v1/conversations", tags=["chat"])
+async def conversations(
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    settings = get_settings()
+    async with request_client() as client:
+        token = bearer_token(authorization)
+        identity = await _identity(client, settings, token)
+        _, role = await _context_token(client, settings, token, identity, demo_role)
+        rows = await _history_rows(client, settings, token, identity, role)
+    grouped = {}
+    for row in rows:
+        entry = grouped.setdefault(
+            row["conversation_id"],
+            {
+                "id": row["conversation_id"],
+                "title": row["query"][:90],
+                "created_at": row["created_at"],
+            },
+        )
+        entry["updated_at"] = row["created_at"]
+    return {"conversations": list(reversed(list(grouped.values())))}
+
+
+@app.get("/api/v1/conversations/{conversation_id}", tags=["chat"])
+async def conversation(
+    conversation_id: Annotated[UUID, ApiPath()],
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    settings = get_settings()
+    async with request_client() as client:
+        token = bearer_token(authorization)
+        identity = await _identity(client, settings, token)
+        scoped_token, role = await _context_token(client, settings, token, identity, demo_role)
+        rows = await _history_rows(client, settings, token, identity, role, str(conversation_id))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        for row in rows:
+            saved = row.get("response") or {}
+            ids = list(
+                dict.fromkeys(
+                    c.get("citation_id")
+                    for claim in saved.get("claims", [])
+                    for c in claim.get("citations", [])
+                    if c.get("citation_id")
+                )
+            )
+            try:
+                ids = [str(UUID(value)) for value in ids if isinstance(value, str)][:100]
+            except ValueError:
+                ids = []
+            current = []
+            if ids:
+                # Reauthorize every saved reference under the current grants.
+                visible = await _rest_rows(
+                    client,
+                    settings,
+                    scoped_token,
+                    "knowledge_chunks",
+                    params={
+                        "id": f"in.({','.join(ids)})",
+                        "select": (
+                            "id,content,source_name,source_type,source_id,document_id,metadata,"
+                            "page_number,row_id,image_id,ocr_region"
+                        ),
+                        "limit": "100",
+                    },
+                )
+                current = visible.json()
+            _, canonical = prepare_generation_context(
+                row["query"], [{**item, "chunk_id": item["id"]} for item in current]
+            )
+            references = [
+                {"evidence_ids": [c.get("evidence_id") for c in claim.get("citations", [])]}
+                for claim in saved.get("claims", [])
+            ]
+            rebuilt = validate_generation({"claims": references}, canonical)
+            row["response"] = {
+                "request_id": row.get("id", str(uuid4())),
+                "conversation_id": str(conversation_id),
+                "trace": {
+                    key: value
+                    for key, value in saved.get("trace", {}).items()
+                    if key
+                    in {
+                        "timing_ms",
+                        "generation_model",
+                        "evidence_items_sent_to_model",
+                        "history_saved",
+                        "active_role",
+                        "fallback_used",
+                    }
+                },
+                **rebuilt,
+            }
+    return {"turns": rows}
+
+
+@app.delete("/api/v1/conversations/{conversation_id}", tags=["chat"])
+async def hide_conversation(
+    conversation_id: Annotated[UUID, ApiPath()],
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    settings = get_settings()
+    async with request_client() as client:
+        token = bearer_token(authorization)
+        identity = await _identity(client, settings, token)
+        _, role = await _context_token(client, settings, token, identity, demo_role)
+        response = await client.patch(
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/query_history",
+            headers=_rest_headers(settings, token),
+            params={
+                "conversation_id": f"eq.{conversation_id}",
+                "user_id": f"eq.{identity['user_id']}",
+                "organization_id": f"eq.{identity['organization_id']}",
+                "active_role": f"eq.{role}",
+            },
+            json={"deleted_at": datetime.now(UTC).isoformat()},
+        )
+    if response.is_error:
+        raise IntegrationFailure("Conversation could not be removed")
+    return {"state": "removed"}

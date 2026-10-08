@@ -1,5 +1,5 @@
 {
-  "table": "orders",
+  "table": "purchase_orders",
   "records": [
     {
       "order_id": "PO-8821",

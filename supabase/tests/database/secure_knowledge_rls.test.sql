@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(24);
+select plan(40);
 
 select ok(
   (select count(*) = 7 and bool_and(relrowsecurity)
@@ -93,6 +93,32 @@ insert into public.knowledge_chunks (
   ('50000000-0000-4000-8000-000000000004', '10000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000004', 'structured', 'Sales opportunity records', 'opportunities', 'OPP-2048', 0, 'Acme opportunity renewal forecast USD 72,000', ('[0,0,1,' || repeat('0,', 1532) || '0]')::extensions.vector),
   ('50000000-0000-4000-8000-000000000005', '10000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000005', 'structured', 'Engineering project records', 'projects', 'PRJ-ATLAS', 0, 'Atlas Gateway engineering delivery milestone 2026-11-15', ('[0,0,0,1,' || repeat('0,', 1531) || '0]')::extensions.vector);
 
+-- The structured index is valid only while the actual typed row exists and matches.
+insert into public.customers (organization_id, customer_id, document_id, name, status) values
+('10000000-0000-4000-8000-000000000001','ACME','40000000-0000-4000-8000-000000000001','Acme','active'),
+('10000000-0000-4000-8000-000000000002','ACME','40000000-0000-4000-8000-000000000003','Acme','active');
+insert into public.invoices (organization_id,invoice_id,document_id,customer_id,customer,currency,total_minor_units,invoice_date,due_date,payment_status,status_as_of) values
+('10000000-0000-4000-8000-000000000001','INV-2048','40000000-0000-4000-8000-000000000001','ACME','Acme','USD',4800000,'2026-09-01','2026-10-01','unpaid','2026-10-08'),
+('10000000-0000-4000-8000-000000000002','INV-9999','40000000-0000-4000-8000-000000000003','ACME','Acme','USD',9900000,'2026-09-01','2026-10-01','unpaid','2026-10-08');
+insert into public.employees (organization_id,employee_id,document_id,role,employment_status) values
+('10000000-0000-4000-8000-000000000001','EMP-002','40000000-0000-4000-8000-000000000002','Engineer','active');
+insert into public.projects (organization_id,project_id,document_id,name,status) values
+('10000000-0000-4000-8000-000000000001','PRJ-ATLAS','40000000-0000-4000-8000-000000000005','Atlas Gateway','active');
+insert into public.opportunities (organization_id,opportunity_id,document_id,customer,stage,annual_value_minor_units) values
+('10000000-0000-4000-8000-000000000001','OPP-2048','40000000-0000-4000-8000-000000000004','Acme','renewal',7200000);
+update public.knowledge_chunks k set metadata = jsonb_build_object('table',r.table_name,'fields',r.fields)
+from public.structured_records r where r.document_id=k.document_id and r.row_id=k.row_id;
+
+select ok((select count(*)=8 and bool_and(relrowsecurity) from pg_class where relnamespace='public'::regnamespace and relname in ('customers','projects','employees','invoices','payments','purchase_orders','opportunities','query_history')), 'RLS covers all new tables');
+select ok((select 'security_invoker=true'=any(reloptions) from pg_class where oid='public.structured_records'::regclass), 'Structured origin view invokes caller policies');
+select ok(not has_table_privilege('authenticated','public.invoices','insert'), 'Users cannot insert typed rows directly');
+select ok(not has_table_privilege('anon','public.invoices','select'), 'Anonymous users cannot inspect typed rows');
+select ok(not has_column_privilege('authenticated','public.query_history','response','update'), 'Stored responses are immutable to authenticated users');
+select ok(has_column_privilege('authenticated','public.query_history','deleted_at','update'), 'Owners can hide history');
+select throws_ok($$insert into public.knowledge_chunks (organization_id,document_id,source_type,source_name,source_id,chunk_index,content) values ('10000000-0000-4000-8000-000000000002','40000000-0000-4000-8000-000000000001','pdf','forged','forged',0,'forged')$$, '23503', null, 'Cross-organization chunk/document relationship fails');
+insert into public.query_history (conversation_id,user_id,organization_id,active_role,query,response) values
+('60000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','Finance Manager','Terms?','{}');
+
 insert into public.access_grants (organization_id, document_id, principal_type, principal_id)
 values
   ('10000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', 'role', '30000000-0000-4000-8000-000000000001'),
@@ -111,6 +137,8 @@ set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4
 set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000001';
 select is((select count(*) from public.knowledge_chunks), 1::bigint,
   'finance user sees only finance chunks in their organization');
+select is((select count(*) from public.invoices),1::bigint,'Finance can inspect its authorized typed invoice');
+select is((select count(*) from public.query_history),1::bigint,'Owner can read saved history');
 select is((select count(*) from public.match_knowledge_chunks(
   ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Acme invoice', 12
 )), 1::bigint, 'finance retrieval returns its authorized invoice');
@@ -129,6 +157,9 @@ select is((select count(*) from public.knowledge_chunks
 select is((select count(*) from public.documents
   where id = '40000000-0000-4000-8000-000000000001'), 0::bigint,
   'HR cannot discover the finance filename by ID');
+select is((select count(*) from public.invoices),0::bigint,'HR cannot read typed finance rows');
+select is((select count(*) from public.query_history),0::bigint,'Another identity cannot read history');
+select throws_ok($$insert into public.query_history(conversation_id,user_id,organization_id,active_role,query,response) values ('60000000-0000-4000-8000-000000000002','20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','CEO','forged','{}')$$,'42501',null,'User cannot forge another history owner');
 
 set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000003"}';
 set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000003';
@@ -168,5 +199,29 @@ select is((select count(*) from public.knowledge_chunks
   where id = '50000000-0000-4000-8000-000000000002'), 0::bigint,
   'Engineer role cannot discover the HR salary citation by ID');
 
+reset role;
+-- Row edits and deletions must immediately invalidate old index representations.
+update public.invoices set payment_status='paid' where invoice_id='INV-2048';
+set local role authenticated;
+set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000001"}';
+set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000001';
+select is((select count(*) from public.knowledge_chunks),0::bigint,'Changed row denies stale unpaid indexed excerpt');
+reset role;
+update public.invoices set payment_status='unpaid' where invoice_id='INV-2048';
+delete from public.invoices where invoice_id='INV-2048';
+set local role authenticated;
+select is((select count(*) from public.knowledge_chunks),0::bigint,'Deleted structured row denies orphaned index evidence');
+reset role;
+delete from public.access_grants where document_id='40000000-0000-4000-8000-000000000002';
+set local role authenticated;
+set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000002"}';
+set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000002';
+select is((select count(*) from public.knowledge_chunks),0::bigint,'Revoked grant denies retrieval immediately');
+reset role;
+delete from public.documents where id='40000000-0000-4000-8000-000000000005';
+set local role authenticated;
+set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000006"}';
+set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000006';
+select is((select count(*) from public.knowledge_chunks),0::bigint,'Deleted document removes source chunks');
 select * from finish();
 rollback;

@@ -154,7 +154,6 @@ async def generate_claims(
             for model in (
                 settings.gemini_chat_model,
                 settings.gemini_fallback_chat_model,
-                *settings.gemini_additional_fallback_chat_models,
             )
             if model
         )
@@ -176,24 +175,12 @@ async def generate_claims(
                         "items": {
                             "type": "OBJECT",
                             "properties": {
-                                "text": {"type": "STRING"},
-                                "citation_ids": {
+                                "evidence_ids": {
                                     "type": "ARRAY",
                                     "items": {"type": "STRING"},
                                 },
-                                "supporting_quotes": {
-                                    "type": "ARRAY",
-                                    "items": {
-                                        "type": "OBJECT",
-                                        "properties": {
-                                            "citation_id": {"type": "STRING"},
-                                            "quote": {"type": "STRING"},
-                                        },
-                                        "required": ["citation_id", "quote"],
-                                    },
-                                },
                             },
-                            "required": ["text", "citation_ids", "supporting_quotes"],
+                            "required": ["evidence_ids"],
                         },
                     }
                 },
@@ -229,7 +216,7 @@ async def generate_claims(
             if model_index + 1 < len(models):
                 continue
             raise last_failure from exc
-        if response.status_code in {429, 500, 502, 503, 504} and model_index + 1 < len(models):
+        if response.status_code in {500, 502, 503, 504} and model_index + 1 < len(models):
             continue
         if response.is_error:
             code = (
@@ -252,15 +239,11 @@ async def generate_claims(
             last_failure = IntegrationFailure(
                 "Gemini returned malformed structured output", code="provider_invalid_response"
             )
-            if model_index + 1 < len(models):
-                continue
             raise last_failure from exc
         if not isinstance(output, dict):
             last_failure = IntegrationFailure(
                 "Gemini returned malformed structured output", code="provider_invalid_response"
             )
-            if model_index + 1 < len(models):
-                continue
             raise last_failure
         output["_model"] = used_model
         output["_fallback_used"] = fallback_used

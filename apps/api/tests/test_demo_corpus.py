@@ -37,7 +37,7 @@ def test_corpus_covers_required_pdf_image_and_record_domains() -> None:
         if source["source_type"] == "structured"
     }
 
-    assert counts == {"pdf": 2, "image_ocr": 2, "structured": 2}
+    assert counts == {"pdf": 8, "image_ocr": 4, "structured": 7}
     assert {
         "documents/contracts/acme-contract-ACM-MSA-2026-07.pdf",
         "documents/security/prompt-injection-test-01.pdf",
@@ -46,10 +46,17 @@ def test_corpus_covers_required_pdf_image_and_record_domains() -> None:
         "documents/finance/acme-invoice-ACM-INV-2048.png",
         "documents/hr/employee-acknowledgement-EMP-020.png",
     } <= paths
-    assert {"invoices", "projects"} == tables
+    assert {
+        "invoices",
+        "projects",
+        "employees",
+        "payments",
+        "customers",
+        "purchase_orders",
+        "opportunities",
+    } == tables
     assert all(
-        any(role in source["allowed_roles"] for source in sources)
-        for role in manifest["roles"]
+        any(role in source["allowed_roles"] for source in sources) for role in manifest["roles"]
     )
 
 

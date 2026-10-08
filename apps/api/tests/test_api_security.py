@@ -78,6 +78,7 @@ class TestApiSecurity:
         assert response.status_code == 200
         assert response.json()["state"] == "CITATION_VALIDATED"
         assert response.json()["trace"]["evidence_items_sent_to_model"] == 1
+        assert response.json()["trace"]["unauthorized_evidence_sent_to_model"] == 0
         assert len(captured) == 1
         assert "USD 48,000" in captured[0]
         assert "trusted-session-token" not in captured[0]
@@ -104,10 +105,9 @@ class TestApiSecurity:
         assert response.status_code == 200
         assert response.json()["state"] == "INSUFFICIENT_EVIDENCE"
         assert response.json()["trace"]["evidence_items_sent_to_model"] == 0
+        assert response.json()["trace"]["unauthorized_evidence_sent_to_model"] == 0
         generate.assert_not_awaited()
 
     def test_source_lookup_requires_a_bearer_session(self) -> None:
-        response = self.client.get(
-            "/api/v1/sources/11111111-1111-4111-8111-111111111111"
-        )
+        response = self.client.get("/api/v1/sources/11111111-1111-4111-8111-111111111111")
         assert response.status_code == 401

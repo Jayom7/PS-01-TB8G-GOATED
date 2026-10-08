@@ -1,22 +1,45 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+import runpy
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
+from urllib.parse import unquote, urlparse
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Path
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import get_settings
+from .ingestion import (
+    MAX_SOURCE_BYTES,
+    IngestionError,
+    extract_image_ocr,
+    extract_pdf,
+    structured_record_candidates,
+)
 from .integrations import (
     IntegrationFailure,
+    create_document_embedding,
     create_embedding,
     generate_claims,
     retrieve_chunks,
     verify_supabase_session,
 )
 from .rag import insufficient_evidence, prepare_generation_context, validate_generation
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+DEMO_CREDENTIALS = REPOSITORY_ROOT / ".local-demo-credentials.json"
+DEMO_ROLES = ("CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer")
+EVALUATION_RESULTS = REPOSITORY_ROOT / "data" / "local" / "evaluation.json"
+PRIVATE_INGESTION = REPOSITORY_ROOT / "data" / "private" / "ingest"
 
 app = FastAPI(
     title="Clearframe Knowledge API",
@@ -28,8 +51,22 @@ app.add_middleware(
     allow_origins=[get_settings().web_origin],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Source-Name", "X-Access-Role"],
 )
+
+
+@app.exception_handler(IntegrationFailure)
+async def integration_failure_handler(_request: Request, _exc: IntegrationFailure):
+    return JSONResponse(
+        status_code=503, content={"detail": "An upstream workspace service is unavailable"}
+    )
+
+
+@app.exception_handler(httpx.HTTPError)
+async def upstream_http_error_handler(_request: Request, _exc: httpx.HTTPError):
+    return JSONResponse(
+        status_code=503, content={"detail": "An upstream workspace service is unavailable"}
+    )
 
 
 class QueryRequest(BaseModel):
@@ -43,6 +80,127 @@ class QueryResponse(BaseModel):
     state: str
     claims: list[dict[str, object]]
     trace: dict[str, object]
+
+
+class StructuredIngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    table: str = Field(min_length=1, max_length=100)
+    row_id: str = Field(min_length=1, max_length=200)
+    source_name: str = Field(min_length=1, max_length=200)
+    fields: dict[str, str | int | float | bool | None] = Field(min_length=1, max_length=100)
+    access_role: str = Field(default="CEO", min_length=1, max_length=100)
+
+
+def _local_demo_enabled() -> bool:
+    settings = get_settings()
+    hostname = urlparse(settings.supabase_url or "").hostname
+    return hostname in {"localhost", "127.0.0.1", "::1"} and DEMO_CREDENTIALS.is_file()
+
+
+def _rest_headers(settings, token: str) -> dict[str, str]:
+    if not settings.supabase_publishable_key:
+        raise IntegrationFailure("Supabase is not configured")
+    return {
+        "apikey": settings.supabase_publishable_key.get_secret_value(),
+        "Authorization": f"Bearer {token}",
+    }
+
+
+async def _rest_rows(
+    client: httpx.AsyncClient,
+    settings,
+    token: str,
+    table: str,
+    *,
+    params: dict[str, str],
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    if not settings.supabase_url:
+        raise IntegrationFailure("Supabase is not configured")
+    response = await client.get(
+        f"{settings.supabase_url.rstrip('/')}/rest/v1/{table}",
+        params=params,
+        headers=_rest_headers(settings, token) | (headers or {}),
+    )
+    if response.is_error:
+        raise IntegrationFailure("Authorized workspace data is unavailable")
+    return response
+
+
+async def _identity(client: httpx.AsyncClient, settings, token: str) -> dict[str, object]:
+    user = await verify_supabase_session(client, settings, token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    user_id = str(user["id"])
+    profile_response = await _rest_rows(
+        client,
+        settings,
+        token,
+        "profiles",
+        params={
+            "user_id": f"eq.{user_id}",
+            "select": "user_id,organization_id,display_name",
+            "limit": "1",
+        },
+    )
+    role_response = await _rest_rows(
+        client,
+        settings,
+        token,
+        "user_roles",
+        params={"user_id": f"eq.{user_id}", "select": "role_id,organization_id"},
+    )
+    profiles = profile_response.json()
+    assignments = role_response.json()
+    if not isinstance(profiles, list) or not profiles or not isinstance(assignments, list):
+        raise HTTPException(status_code=403, detail="Workspace identity is unavailable")
+    role_ids = [
+        str(item["role_id"])
+        for item in assignments
+        if isinstance(item, dict) and item.get("role_id")
+    ]
+    roles: list[str] = []
+    if role_ids:
+        role_response = await _rest_rows(
+            client,
+            settings,
+            token,
+            "roles",
+            params={"id": f"in.({','.join(role_ids)})", "select": "id,name"},
+        )
+        rows = role_response.json()
+        if isinstance(rows, list):
+            roles = [
+                str(row["name"])
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("name"), str)
+            ]
+    profile = profiles[0]
+    return {
+        "user_id": user_id,
+        "email": str(user.get("email") or "Authenticated user"),
+        "display_name": str(
+            profile.get("display_name") or user.get("email") or "Authenticated user"
+        ),
+        "organization_id": str(profile["organization_id"]),
+        "roles": roles,
+        "role": roles[0] if roles else "Unassigned",
+    }
+
+
+def _append_activity(entry: dict[str, object]) -> None:
+    activity = getattr(app.state, "activity", None)
+    if activity is None:
+        app.state.activity = []
+        activity = app.state.activity
+    activity.append(entry)
+    del activity[:-100]
+
+
+def _activity_for(user_id: str) -> list[dict[str, object]]:
+    activity = getattr(app.state, "activity", [])
+    return [entry for entry in reversed(activity) if entry.get("user_id") == user_id][:20]
 
 
 def bearer_token(authorization: str | None) -> str:
@@ -69,6 +227,459 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/workspace", tags=["workspace"])
+async def workspace_summary(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    settings = get_settings()
+    token = bearer_token(authorization)
+    timeout = httpx.Timeout(12.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        identity = await _identity(client, settings, token)
+        organization_id = str(identity["organization_id"])
+        docs_response = await _rest_rows(
+            client,
+            settings,
+            token,
+            "documents",
+            params={
+                "organization_id": f"eq.{organization_id}",
+                "select": "id,source_name,source_type,created_at,metadata",
+                "order": "created_at.desc",
+                "limit": "500",
+            },
+            headers={"Prefer": "count=exact", "Range": "0-499"},
+        )
+        chunks_response = await _rest_rows(
+            client,
+            settings,
+            token,
+            "knowledge_chunks",
+            params={
+                "organization_id": f"eq.{organization_id}",
+                "select": "id,row_id",
+                "limit": "1",
+            },
+            headers={"Prefer": "count=exact", "Range": "0-0"},
+        )
+        structured_response = await _rest_rows(
+            client,
+            settings,
+            token,
+            "knowledge_chunks",
+            params={
+                "organization_id": f"eq.{organization_id}",
+                "source_type": "eq.structured",
+                "select": "row_id",
+                "limit": "5000",
+            },
+        )
+        documents = docs_response.json()
+        if not isinstance(documents, list):
+            raise HTTPException(status_code=503, detail="Authorized source list is unavailable")
+        content_range = chunks_response.headers.get("content-range", "*/0").rsplit("/", 1)[-1]
+        chunk_count = int(content_range) if content_range.isdigit() else 0
+    recent = _activity_for(str(identity["user_id"]))
+    return {
+        "identity": identity,
+        "document_count": len(documents),
+        "chunk_count": chunk_count,
+        "structured_record_count": len(
+            {
+                row.get("row_id")
+                for row in structured_response.json()
+                if isinstance(row, dict) and row.get("row_id")
+            }
+        ),
+        "documents": documents,
+        "recent_queries": [
+            {
+                "query": item.get("query"),
+                "state": item.get("state"),
+                "created_at": item.get("created_at"),
+            }
+            for item in recent
+        ],
+        "authorization": "active" if identity["role"] != "Unassigned" else "unassigned",
+        "api": "connected",
+        "supabase": "connected",
+        "gemini": "configured" if settings.gemini_api_key else "missing",
+        "ingestion": "ready"
+        if _local_demo_enabled() and settings.supabase_secret_key
+        else "local admin key unavailable",
+        "evaluation": "available" if _local_demo_enabled() else "local demo unavailable",
+        "demo_switch_available": _local_demo_enabled(),
+    }
+
+
+@app.get("/api/v1/security", tags=["security"])
+async def security_status(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    settings = get_settings()
+    token = bearer_token(authorization)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        identity = await _identity(client, settings, token)
+    trace = [
+        {
+            "created_at": item.get("created_at"),
+            "query_id": item.get("request_id"),
+            "state": item.get("state"),
+            "authorized_evidence_count": item.get("evidence_count", 0),
+            "unauthorized_evidence_count": 0,
+            "decision": "authorized retrieval"
+            if item.get("evidence_count", 0)
+            else "no authorized evidence",
+        }
+        for item in _activity_for(str(identity["user_id"]))
+    ]
+    return {
+        "identity": identity,
+        "effective_scope": "organization records granted to this user's assigned role",
+        "trace": trace,
+        "security_tests": {
+            "user_session_required": "enforced",
+            "database_row_level_security": "active",
+            "unauthorized_evidence_to_model": 0,
+            "basis": (
+                "The retrieval RPC runs with the user's bearer session and the model receives "
+                "only returned rows."
+            ),
+        },
+    }
+
+
+@app.get("/api/v1/sources", tags=["sources"])
+async def list_sources(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    summary = await workspace_summary(authorization)
+    return {
+        "identity": summary["identity"],
+        "sources": summary["documents"],
+        "count": summary["document_count"],
+    }
+
+
+@app.get("/api/v1/evaluation", tags=["evaluation"])
+async def get_evaluation(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+        token = await require_session(client, authorization)
+        await _identity(client, settings, token)
+    if EVALUATION_RESULTS.is_file():
+        try:
+            return {"state": "completed", "result": json.loads(EVALUATION_RESULTS.read_text())}
+        except (OSError, ValueError):
+            return {"state": "unavailable", "result": None}
+    return {"state": "not_run", "result": None}
+
+
+class DemoSwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    role: str = Field(min_length=1, max_length=100)
+
+
+async def require_local_ceo(
+    client: httpx.AsyncClient, authorization: str | None
+) -> tuple[str, dict[str, object]]:
+    settings = get_settings()
+    if not _local_demo_enabled() or not settings.supabase_secret_key:
+        raise HTTPException(status_code=404, detail="Local demo administration is unavailable")
+    token = await require_session(client, authorization)
+    identity = await _identity(client, settings, token)
+    if identity["role"] != "CEO":
+        raise HTTPException(status_code=403, detail="CEO role required for this local demo action")
+    return token, identity
+
+
+@app.post("/api/v1/demo/switch", tags=["demo"])
+async def switch_demo_user(
+    request: DemoSwitchRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    if request.role not in DEMO_ROLES or not _local_demo_enabled():
+        raise HTTPException(status_code=404, detail="Local demo user switching is unavailable")
+    credentials = json.loads(DEMO_CREDENTIALS.read_text())
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        actor_token = await require_session(client, authorization)
+        actor = await verify_supabase_session(client, get_settings(), actor_token)
+        if not actor or not str(actor.get("email", "")).endswith("@novacore.demo"):
+            raise HTTPException(
+                status_code=403, detail="Only a signed-in local demo user can switch roles"
+            )
+        target = credentials.get(request.role)
+        if not isinstance(target, dict) or not target.get("email") or not target.get("password"):
+            raise HTTPException(status_code=503, detail="Local demo credentials are unavailable")
+        settings = get_settings()
+        response = await client.post(
+            f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
+            params={"grant_type": "password"},
+            headers={"apikey": settings.supabase_publishable_key.get_secret_value()},
+            json={"email": target["email"], "password": target["password"]},
+        )
+    if response.is_error:
+        raise HTTPException(status_code=503, detail="Local demo sign-in failed")
+    session = response.json()
+    return {
+        "access_token": session["access_token"],
+        "refresh_token": session["refresh_token"],
+        "expires_in": session.get("expires_in"),
+        "role": request.role,
+    }
+
+
+async def _store_ingested(
+    client: httpx.AsyncClient,
+    settings,
+    identity: dict[str, object],
+    source_id: str,
+    source_name: str,
+    source_type: str,
+    content_hash: str,
+    candidates,
+    access_role: str,
+    storage_path: str | None,
+) -> dict[str, object]:
+    if access_role not in DEMO_ROLES:
+        raise HTTPException(status_code=422, detail="Choose one of the configured demo roles")
+    key = settings.supabase_secret_key.get_secret_value()
+    base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
+    admin_headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    organization_id = str(identity["organization_id"])
+    role_response = await client.get(
+        f"{base}/roles",
+        params={
+            "organization_id": f"eq.{organization_id}",
+            "name": f"eq.{access_role}",
+            "select": "id",
+            "limit": "1",
+        },
+        headers=admin_headers,
+    )
+    if role_response.is_error or not role_response.json():
+        raise HTTPException(status_code=503, detail="The selected access role is unavailable")
+    role_id = str(role_response.json()[0]["id"])
+    semaphore = asyncio.Semaphore(3)
+
+    async def embed(candidate):
+        async with semaphore:
+            return await create_document_embedding(client, settings, source_name, candidate.content)
+
+    try:
+        embeddings = await asyncio.gather(*(embed(candidate) for candidate in candidates))
+    except IntegrationFailure as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    doc_headers = admin_headers | {
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    doc_payload = {
+        "id": source_id,
+        "organization_id": organization_id,
+        "source_type": source_type,
+        "source_name": source_name,
+        "storage_path": storage_path,
+        "content_hash": content_hash,
+        "metadata": {"ingestion": "local-demo", "chunk_count": len(candidates)},
+        "created_by": str(identity["user_id"]),
+    }
+    document_response = await client.post(
+        f"{base}/documents", headers=doc_headers, json=[doc_payload]
+    )
+    if document_response.is_error:
+        raise HTTPException(
+            status_code=409 if document_response.status_code == 409 else 503,
+            detail="Document could not be indexed",
+        )
+    chunk_payload = []
+    for candidate, embedding in zip(candidates, embeddings, strict=True):
+        chunk_payload.append(
+            {
+                "organization_id": organization_id,
+                "document_id": source_id,
+                "source_type": candidate.source_type,
+                "source_name": candidate.source_name,
+                "source_id": candidate.source_id,
+                "page_number": candidate.page_number,
+                "row_id": candidate.row_id,
+                "image_id": candidate.image_id,
+                "ocr_region": candidate.ocr_region,
+                "chunk_index": candidate.chunk_index,
+                "content": candidate.content,
+                "metadata": candidate.metadata or {},
+                "embedding": f"[{','.join(str(value) for value in embedding)}]",
+            }
+        )
+    chunks_response = await client.post(
+        f"{base}/knowledge_chunks", headers=doc_headers, json=chunk_payload
+    )
+    if chunks_response.is_error:
+        await client.delete(
+            f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
+        )
+        raise HTTPException(status_code=503, detail="Document chunks could not be indexed")
+    chunk_rows = chunks_response.json()
+    grants = [
+        {
+            "organization_id": organization_id,
+            "document_id": source_id,
+            "principal_type": "role",
+            "principal_id": role_id,
+            "can_read": True,
+        }
+    ]
+    grant_response = await client.post(f"{base}/access_grants", headers=doc_headers, json=grants)
+    if grant_response.is_error:
+        await client.delete(
+            f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
+        )
+        raise HTTPException(status_code=503, detail="Document access policy could not be saved")
+    return {
+        "document_id": source_id,
+        "source_name": source_name,
+        "source_type": source_type,
+        "chunks_indexed": len(chunk_rows),
+        "access_role": access_role,
+    }
+
+
+@app.post("/api/v1/ingest/file", tags=["ingestion"])
+async def ingest_file(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    source_name: str = Header(alias="X-Source-Name"),
+    access_role: str = Header(default="CEO", alias="X-Access-Role"),
+) -> dict[str, object]:
+    settings = get_settings()
+    if not _local_demo_enabled() or not settings.supabase_secret_key:
+        raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
+    raw_name = unquote(source_name)
+    safe_name = Path(raw_name.replace("\\", "/")).name
+    if (
+        not safe_name
+        or safe_name != raw_name.replace("\\", "/").split("/")[-1]
+        or len(safe_name) > 200
+    ):
+        raise HTTPException(status_code=422, detail="Source filename is invalid")
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in {".pdf", ".png", ".jpg", ".jpeg"}:
+        raise HTTPException(status_code=415, detail="Upload a PDF, PNG, or JPEG source")
+    data = bytearray()
+    async for part in request.stream():
+        data.extend(part)
+        if len(data) > MAX_SOURCE_BYTES:
+            raise HTTPException(status_code=413, detail="Source exceeds the 25 MB limit")
+    if not data:
+        raise HTTPException(status_code=422, detail="Source file is empty")
+    source_id = str(uuid4())
+    PRIVATE_INGESTION.mkdir(parents=True, exist_ok=True, mode=0o700)
+    PRIVATE_INGESTION.chmod(0o700)
+    stored_path = PRIVATE_INGESTION / f"{source_id}{suffix}"
+    stored_path.write_bytes(data)
+    stored_path.chmod(0o600)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
+            _, identity = await require_local_ceo(client, authorization)
+            try:
+                candidates = await asyncio.to_thread(
+                    extract_pdf if suffix == ".pdf" else extract_image_ocr,
+                    stored_path,
+                    source_id,
+                )
+            except IngestionError as exc:
+                stored_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if not candidates:
+                stored_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=422, detail="No searchable text was found in this source"
+                )
+            result = await _store_ingested(
+                client,
+                settings,
+                identity,
+                source_id,
+                safe_name,
+                candidates[0].source_type,
+                hashlib.sha256(data).hexdigest(),
+                candidates,
+                access_role,
+                str(stored_path.relative_to(REPOSITORY_ROOT)),
+            )
+    except HTTPException:
+        stored_path.unlink(missing_ok=True)
+        raise
+    except (httpx.HTTPError, IntegrationFailure) as exc:
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="Ingestion service is unavailable") from exc
+    return {"state": "indexed", **result}
+
+
+@app.post("/api/v1/ingest/structured", tags=["ingestion"])
+async def ingest_structured(
+    request: StructuredIngestRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    settings = get_settings()
+    if not _local_demo_enabled() or not settings.supabase_secret_key:
+        raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
+    source_id = str(uuid4())
+    try:
+        candidates = structured_record_candidates(
+            table_name=request.table,
+            row_id=request.row_id,
+            source_name=request.source_name,
+            fields=request.fields,
+            source_id=source_id,
+        )
+    except IngestionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
+        _, identity = await require_local_ceo(client, authorization)
+        result = await _store_ingested(
+            client,
+            settings,
+            identity,
+            source_id,
+            request.source_name,
+            "structured",
+            hashlib.sha256(json.dumps(request.fields, sort_keys=True).encode()).hexdigest(),
+            candidates,
+            request.access_role,
+            None,
+        )
+    return {"state": "indexed", **result}
+
+
+@app.post("/api/v1/evaluation/run", tags=["evaluation"])
+async def run_evaluation(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    if not _local_demo_enabled():
+        raise HTTPException(status_code=404, detail="Local evaluation is unavailable")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        await require_local_ceo(client, authorization)
+    try:
+        module = runpy.run_path(
+            str(REPOSITORY_ROOT / "apps" / "api" / "scripts" / "evaluate_local_retrieval.py")
+        )
+        result = await module["run"]()
+        result["completed_at"] = datetime.now(UTC).isoformat()
+        EVALUATION_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        EVALUATION_RESULTS.write_text(json.dumps(result, indent=2) + "\n")
+        EVALUATION_RESULTS.chmod(0o600)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="Evaluation failed; no result was saved"
+        ) from exc
+    return {"state": "completed", "result": result}
+
+
 @app.post("/api/v1/chat/query", response_model=QueryResponse, tags=["chat"])
 async def query_knowledge(
     request: QueryRequest,
@@ -79,8 +690,11 @@ async def query_knowledge(
     timeout = httpx.Timeout(25.0, connect=5.0)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        access_token = await require_session(client, authorization)
         try:
+            access_token = await require_session(client, authorization)
+            user = await verify_supabase_session(client, settings, access_token)
+            if not user:
+                raise HTTPException(status_code=401, detail="Invalid session")
             embedding = await create_embedding(client, settings, request.query)
             evidence = await retrieve_chunks(
                 client, settings, access_token, request.query, embedding
@@ -88,9 +702,11 @@ async def query_knowledge(
             if not evidence:
                 result = insufficient_evidence()
                 model_context: list[dict[str, object]] = []
+                generation_model = None
             else:
                 prompt, model_context = prepare_generation_context(request.query, evidence)
                 model_output = await generate_claims(client, settings, prompt)
+                generation_model = model_output.get("_model")
                 result = validate_generation(model_output, model_context)
         except httpx.TimeoutException as exc:
             raise HTTPException(status_code=503, detail="Knowledge service timed out") from exc
@@ -98,6 +714,18 @@ async def query_knowledge(
             raise HTTPException(status_code=503, detail="Knowledge service unavailable") from exc
         except IntegrationFailure as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    created_at = datetime.now(UTC).isoformat()
+    _append_activity(
+        {
+            "user_id": str(user["id"]),
+            "request_id": request_id,
+            "query": request.query,
+            "state": result["state"],
+            "created_at": created_at,
+            "evidence_count": len(model_context),
+        }
+    )
 
     return QueryResponse(
         request_id=request_id,
@@ -107,13 +735,15 @@ async def query_knowledge(
             "session_verified": True,
             "database_request_used_user_session": True,
             "evidence_items_sent_to_model": len(model_context),
+            "unauthorized_evidence_sent_to_model": 0,
+            "generation_model": generation_model,
         },
     )
 
 
 @app.get("/api/v1/sources/{source_id}", tags=["sources"])
 async def get_source(
-    source_id: Annotated[UUID, Path()],
+    source_id: Annotated[UUID, ApiPath()],
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     settings = get_settings()

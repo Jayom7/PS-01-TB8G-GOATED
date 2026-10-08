@@ -13,6 +13,7 @@ import httpx
 
 from ps01_api.config import get_settings
 from ps01_api.integrations import create_embedding
+from ps01_api.rag import citation_from_row
 
 ROOT = Path(__file__).resolve().parents[3]
 CREDENTIALS = ROOT / ".local-demo-credentials.json"
@@ -86,6 +87,7 @@ async def run() -> dict[str, object]:
     api_key = local["PUBLISHABLE_KEY"]
     settings = get_settings()
     results: list[dict[str, object]] = []
+    retrieved_rows: list[dict[str, object]] = []
     async with httpx.AsyncClient(timeout=35.0) as client:
         tokens: dict[str, str] = {}
         for role in {case["role"] for case in CASES}:
@@ -118,6 +120,7 @@ async def run() -> dict[str, object]:
             )
             response.raise_for_status()
             rows = response.json()
+            retrieved_rows.extend(rows)
             found = [str(row["source_id"]) for row in rows]
             expected = case["expected"]
             relevant_ranks = [index for index, source in enumerate(found, 1) if source in expected]
@@ -131,6 +134,9 @@ async def run() -> dict[str, object]:
                     "hit": bool(relevant_ranks) if expected else not forbidden_hits,
                     "reciprocal_rank": 1 / relevant_ranks[0] if relevant_ranks else 0.0,
                     "authorized_rows": len(rows),
+                    "source_types_found": sorted(
+                        {str(row.get("source_type")) for row in rows if row.get("source_type")}
+                    ),
                     "forbidden_source_hits": forbidden_hits,
                     "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 }
@@ -172,8 +178,15 @@ async def run() -> dict[str, object]:
             }
         )
 
-    positive = [
-        row for row, case in zip(results, CASES, strict=False) if case.get("expected")
+    positive = [row for row, case in zip(results, CASES, strict=False) if case.get("expected")]
+    cited = [citation_from_row(row) for row in retrieved_rows]
+    citation_checks = [bool(item.get("citation_id") and item.get("location")) for item in cited]
+    invoice_modalities = set(results[0].get("source_types_found", []))
+    structured_result = results[3]
+    latency_values = [
+        float(row["latency_ms"])
+        for row in results
+        if isinstance(row.get("latency_ms"), (int, float))
     ]
     return {
         "dataset": "novacore-synthetic-v1",
@@ -185,14 +198,22 @@ async def run() -> dict[str, object]:
         "mean_reciprocal_rank": round(
             sum(float(row["reciprocal_rank"]) for row in positive) / len(positive), 3
         ),
-        "authorization_violations": sum(
-            len(row["forbidden_source_hits"]) for row in results
-        )
+        "authorization_violations": sum(len(row["forbidden_source_hits"]) for row in results)
         + sum(
             int(row.get("unauthorized_chunk_rows", 0))
             + int(row.get("unauthorized_document_rows", 0))
             for row in results
         ),
+        "measured_checks": {
+            "ocr_retrieval": "image_ocr" in invoice_modalities,
+            "structured_record_retrieval": bool(structured_result["hit"]),
+            "cross_modal_retrieval": {"pdf", "image_ocr"}.issubset(invoice_modalities),
+            "citation_provenance_valid": sum(citation_checks),
+            "citation_provenance_checked": len(citation_checks),
+            "mean_latency_ms": round(sum(latency_values) / len(latency_values), 1)
+            if latency_values
+            else None,
+        },
         "results": results,
     }
 

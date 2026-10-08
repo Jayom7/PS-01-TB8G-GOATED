@@ -6,56 +6,57 @@ requester's identity attached to retrieval.
 
 ## Current implementation
 
-- Next.js sign-in form backed by Supabase Auth and a server-side session gate
-  for the workspace.
-- FastAPI `POST /api/v1/chat/query` verifies the Supabase session, embeds the
-  question with Gemini Embedding 2, calls the user-token-scoped
-  `match_knowledge_chunks` RPC, and sends only the bounded returned evidence to
-  Gemini Flash.
-- Claims are returned only when their proposed citation IDs belong to the
-  exact model context and have a supported source location. This validates
-  citation membership and provenance, not semantic claim support; the API
-  labels this `CITATION_VALIDATED`. An empty result becomes
-  `INSUFFICIENT_EVIDENCE`.
-- Citation lookup uses the same user token against `knowledge_chunks`.
-- The frontend shows real session state, query states, source details, and
-  honest setup states for areas that are not connected yet.
+- Next.js sign-in and a Supabase-authenticated workspace with Dashboard, Ask,
+  Sources, Ingest, Security, and Evaluation views.
+- Authenticated FastAPI chat, source lookup, workspace/security status, and
+  evaluation results. Query evidence is retrieved with the user's token and
+  database RLS; the API sends only those returned chunks to Gemini.
+- Local demo identity switching uses the seeded role users and changes the
+  actual Supabase Auth session. It is enabled only for loopback Supabase and
+  the ignored `.local-demo-credentials.json` file.
+- CEO-only local ingestion accepts PDFs, images, and structured JSON, creates
+  Gemini embeddings, and persists documents/chunks and role grants. Original
+  uploads are stored privately under ignored `data/private/ingest/`.
+- Citation responses are checked for membership in model context and source
+  provenance. This validates citation membership and provenance, not semantic
+  claim support. Empty evidence returns `INSUFFICIENT_EVIDENCE`.
+- Evaluation runs the local retrieval cases and reports recall, rank,
+  authorization violations, citation provenance, OCR, structured, cross-modal,
+  and latency results. Results are saved locally and exposed to authenticated
+  workspace users.
 
-The migration has been applied to the local Supabase stack. Its 17 database
-allow/deny tests and the local schema linter pass. The hosted project has not
-been migrated because the Supabase CLI is not authenticated. Gemini embedding
-and generation requests and Supabase Auth settings requests have succeeded
-with the configured credentials. These checks do not validate the hosted
-database or the full demo flow.
-
-PDF text extraction, bounded OCR for scanned PDFs and images, and structured
-record normalization are implemented as ingestion primitives. They are not
-yet connected to an authenticated upload route or database persistence path.
-Synthetic demo fixtures are in `data/demo/`.
+The local migration set has been applied to the local Supabase stack. No hosted
+Supabase migration or hosted deployment is performed by the local demo
+launcher. Gemini 3.8 Flash is the primary generation model, with 3.6 Flash as
+fallback; provider availability can vary.
 
 ## Local setup
 
 Copy `.env.example` to the repository root as `.env` and replace the server
 values. Copy `apps/web/.env.local.example` to `apps/web/.env.local`; that file
-contains only the public Supabase URL/key and the API base URL. Both local files
+contains only the public Supabase URL/key and API base URL. Both local files
 are ignored by Git. Never place `GEMINI_API_KEY` or `SUPABASE_SECRET_KEY` in a
 `NEXT_PUBLIC_` variable or the web env file.
 
-```sh
-cd apps/web
-pnpm install
-pnpm dev
-```
+Start local Supabase and seed the demo users/data:
 
 ```sh
-cd apps/api
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-uvicorn --app-dir src ps01_api.main:app --reload
+./node_modules/.bin/supabase start
+.venv/bin/python apps/api/scripts/seed_local_demo.py
 ```
 
-Install optional PDF/OCR dependencies with `pip install -e '.[dev,ingestion]'`.
+Start the API and web app in separate terminals:
+
+```sh
+.venv/bin/python apps/api/scripts/run_local_api.py
+pnpm --dir apps/web dev
+```
+
+The API launcher reads local Supabase CLI credentials, refuses remote URLs,
+and binds to `127.0.0.1`. Install optional PDF/OCR dependencies with
+`pip install -e 'apps/api[ingestion]'` from the repository root, or use the
+setup documented in [API setup](apps/api/README.md).
 
 See [API setup](apps/api/README.md), [implementation plan](docs/IMPLEMENTATION_PLAN.md),
-and [review items](docs/REVIEW_NEEDED.md) for the current proof boundaries.
+and [review items](docs/REVIEW_NEEDED.md) for setup details and remaining proof
+boundaries.

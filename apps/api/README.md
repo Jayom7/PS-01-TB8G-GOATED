@@ -1,63 +1,71 @@
 # Clearframe API
 
-FastAPI service for authenticated knowledge queries and source lookup.
+FastAPI service for authenticated queries, source access, local ingestion, and
+workspace operations.
 
-## Current routes
+## Routes
 
-- `GET /health` is liveness only.
-- `POST /api/v1/chat/query` requires a Supabase bearer session. The API checks
-  the session with Supabase Auth, creates a Gemini Embedding 2 vector, calls
-  `match_knowledge_chunks` with the same user token, and sends only retrieved
-  evidence to Gemini Flash.
-- `GET /api/v1/sources/{citation_id}` uses the same user session to fetch an
-  exact chunk. Missing and RLS-hidden rows share the same 404 response.
+- `GET /health` — liveness check.
+- `GET /api/v1/workspace` and `GET /api/v1/security` — current authenticated
+  identity, role-scoped data counts, and recent request security traces.
+- `POST /api/v1/chat/query` — verifies the Supabase bearer session, embeds the
+  question, calls `match_knowledge_chunks` with the same user token, and sends
+  only RLS-returned evidence to Gemini. The request accepts a query, not a
+  client-supplied identity, role, ACL, or evidence set.
+- `GET /api/v1/sources` and `GET /api/v1/sources/{source_id}` — list and open
+  only documents/chunks visible to the signed-in user. Hidden and missing
+  citation rows share the same 404 response.
+- `GET /api/v1/evaluation` — authenticated read of current evaluation results;
+  `POST /api/v1/evaluation/run` is CEO-only and local-demo-only.
+- `POST /api/v1/demo/switch` — changes to a seeded role user's real Supabase
+  Auth session. Available only for a loopback Supabase URL when the ignored
+  `.local-demo-credentials.json` exists.
+- `POST /api/v1/ingest/file` and `POST /api/v1/ingest/structured` — CEO-only
+  local-demo ingestion for PDF/image files and structured JSON records.
+  Uploads are bounded to 25 MB and originals are stored privately under
+  ignored `data/private/ingest/`.
 
-The body accepts only a `query`; client-supplied user, organization, role,
-ACL, or evidence fields are rejected. Retrieval does not use
-`SUPABASE_SECRET_KEY`. That credential is reserved for a future separately
-authorized ingestion path and is not currently read by the query implementation.
+Normal retrieval uses the caller's bearer token and RLS. The server-side
+Supabase secret key is used only by local CEO-gated ingestion, after the local
+launcher confirms that Supabase URL is loopback. Do not expose it to the web
+app or use this local flow against a hosted database.
 
 ## Local setup
 
-From the repository root, copy `.env.example` to `.env`. The API loads that
-file regardless of the launch directory. Start the API with:
+From the repository root, install API dependencies and optional document
+parsers:
 
 ```sh
 python -m venv .venv
 source .venv/bin/activate
-cd apps/api
-pip install -e '.[dev]'
-uvicorn --app-dir src ps01_api.main:app --reload
+pip install -e 'apps/api[dev,ingestion]'
 ```
 
-The migration at `supabase/migrations/` is applied to the local Supabase stack.
-The local pgTAP suite passes 17 authorization, retrieval, and schema checks;
-`supabase db lint --local` reports no schema errors. The hosted project is not
-migrated because Supabase CLI authentication is missing. Provider/network
-errors return generic safe messages; secrets and raw prompts are not logged.
-
-PDF text, scanned PDF and image OCR, and structured-record normalization are
-available as ingestion primitives. The local seed tool embeds and persists the
-synthetic fixtures with role ACLs; this is a developer tool, not a user upload
-route. There is no private original-file storage or background ingestion job.
-Install optional parser dependencies with `pip install -e '.[dev,ingestion]'`.
-
-## Local demo
-
-Start the Docker-backed local Supabase stack, then seed the synthetic corpus
-and five role users:
+Create `.env` from `.env.example` for the Gemini server key. Start Supabase
+with `./node_modules/.bin/supabase start`; the local API launcher obtains the
+local Supabase URL and keys directly from the CLI without displaying them,
+refuses remote URLs, then binds FastAPI to `127.0.0.1:8000`:
 
 ```sh
-./node_modules/.bin/supabase start
-.venv/bin/python apps/api/scripts/seed_local_demo.py
-.venv/bin/python apps/api/scripts/evaluate_local_retrieval.py
+.venv/bin/python apps/api/scripts/run_local_api.py
 ```
 
-The seed tool refuses non-loopback Supabase URLs. It saves local passwords to
-`.local-demo-credentials.json`, which is git-ignored and mode `600`.
-`configure_local_web.py` points the ignored Next.js env file to local
-Supabase; `run_local_api.py` launches FastAPI with the local project URL and
-public key. Start the UI with `pnpm --dir apps/web dev`. The full Gemini
-generation flow is exercised with
-`.venv/bin/python apps/api/scripts/run_local_demo.py`; temporary provider 503s
-are reported as incomplete demo runs.
+Seed local demo data and accounts with
+`.venv/bin/python apps/api/scripts/seed_local_demo.py`. Credentials are stored
+in the ignored `.local-demo-credentials.json` file with mode `600`.
+
+## Verification
+
+Run the API checks with:
+
+```sh
+.venv/bin/ruff check apps/api/src apps/api/scripts apps/api/tests
+.venv/bin/pytest apps/api/tests -q
+```
+
+The local evaluation runner exercises retrieval and authorization against the
+seeded corpus:
+
+```sh
+.venv/bin/python apps/api/scripts/evaluate_local_retrieval.py
+```

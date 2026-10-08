@@ -38,7 +38,9 @@ def main() -> None:
         raise RuntimeError("Refusing to launch the local API against a remote Supabase URL.")
     environment["SUPABASE_URL"] = url
     environment["SUPABASE_PUBLISHABLE_KEY"] = values["PUBLISHABLE_KEY"]
-    environment.pop("SUPABASE_SECRET_KEY", None)
+    # This launcher refuses remote projects above. The key stays server-side and
+    # is used only by the local CEO-gated ingestion endpoints.
+    environment["SUPABASE_SECRET_KEY"] = values["SERVICE_ROLE_KEY"]
     os.execvpe(
         sys.executable,
         [

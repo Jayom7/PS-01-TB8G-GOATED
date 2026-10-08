@@ -18,16 +18,17 @@ or deeper review. It does not certify the system as secure.
   not been checked there.
 - **Next review:** authenticate Supabase CLI, link the existing project, apply
   the migration, then run the allow/deny suite against hosted state.
-- **Boundary:** local allow/deny results do not verify the hosted project;
-  keep hosted-state claims separate and keep UI role switching disabled.
+- **Boundary:** local allow/deny results do not verify the hosted project.
+  Role switching is enabled only in the loopback local demo.
 
 ## R-002 — Filtered HNSW recall and query plans
 
 - **Implemented locally:** HNSW and full-text indexes plus an invoker hybrid
   retrieval RPC are applied and exercised against local Supabase.
-- **Verified locally:** small synthetic evaluation reports Recall@12 1.0 and
-  MRR 0.775 over four authorized retrieval cases, with zero forbidden-source
-  hits in one HR denial case.
+- **Verified locally:** synthetic evaluation reports Recall@12 1.0 and MRR
+  0.775 over five retrieval cases, zero authorization violations, valid
+  provenance for all 39 returned citations, and OCR, structured, and
+  cross-modal retrieval coverage.
 - **Unverified:** this sample is too small for production conclusions;
   filtered candidate recall, iterative scan settings, `EXPLAIN` plans, and
   representative latency have not been measured.
@@ -41,31 +42,34 @@ or deeper review. It does not certify the system as secure.
   authenticated API calls. The client cannot submit role, user, organization,
   ACL, or evidence fields in a query.
 - **Verified locally:** five NovaCore auth users, profiles, and role records
-  were created in local Supabase. Local credentials are stored separately in
-  a git-ignored owner-only file. No hosted users were created.
-- **Missing:** server-verified demo identity switching in the UI. The UI does
-  not offer a role selector.
-- **Next review:** implement session switching only after the backend demo is
-  available with Gemini generation.
+  were created in local Supabase. CEO-to-Finance and Finance-to-HR switching
+  returned new Supabase sessions and updated the resolved API role. Local
+  credentials are stored separately in a git-ignored owner-only file. No
+  hosted users were created.
+- **Boundary:** switching is only enabled when both local Supabase and the
+  ignored demo credential file are present. Do not enable this broker for a
+  hosted project.
 
 ## R-004 — Ingestion and source storage
 
 - **Implemented locally:** bounded PDF extraction, scanned-page/image OCR,
-  structured-row normalization, Gemini embeddings, and local Supabase chunk
-  and ACL seeding. PaddleOCR was exercised on the synthetic invoice scan.
-- **Missing:** user-authenticated upload, private original-file storage,
-  background ingestion jobs, and transactional ACL/index writes. The current
-  seed script is an explicit local developer tool.
-- **Next review:** define a narrowly authorized write path and test uploaded
-  source provenance and access inheritance before exposing ingestion UI.
+  structured-row normalization, Gemini embeddings, CEO-gated local upload and
+  structured ingestion routes, private original-file storage, and role grants.
+  PaddleOCR was exercised on the synthetic invoice scan.
+- **Not implemented:** background ingestion jobs. The local upload and
+  service-key persistence paths have not been reviewed for hosted deployment.
+- **Next review:** exercise uploaded file/structured flows end to end and
+  review source provenance, write rollback, and access inheritance before any
+  hosted ingestion deployment.
 
 ## R-005 — Live provider and database connectivity
 
-- **Verified:** Supabase Auth settings returned HTTP 200 with configured public
-  and server keys. Gemini chat and embedding model resources returned HTTP 200;
-  live embedding produced 1536 dimensions. Gemini generation succeeded in a
-  prior smoke check but returned intermittent HTTP 503 `UNAVAILABLE` during
-  the final multi-query demo attempt due to high provider demand.
+- **Verified:** Supabase Auth settings and Gemini model/embedding checks
+  returned HTTP 200; live embedding produced 1536 dimensions. A live Finance
+  answer succeeded with Gemini 3.8 Flash and two citations. Later, Gemini
+  generation returned 503 `UNAVAILABLE` and timed out on both configured
+  models during an adversarial prompt run; the final live provider result is
+  therefore incomplete.
 - **Blocked:** hosted database migration and schema checks require Supabase CLI
   authentication or direct database credentials. Current API keys alone do
   not provide the CLI project token or database password.

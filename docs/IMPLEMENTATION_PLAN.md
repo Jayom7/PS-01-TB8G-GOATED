@@ -1,70 +1,45 @@
 # Implementation Plan
 
-This plan prioritizes a reliable vertical slice toward the stated ~70%
-prototype milestone. Every phase has a clear proof boundary; no phase is
-complete by documentation alone.
+Build the vertical slice on the existing Next.js, FastAPI, and Supabase
+foundation. Do not replace the architecture.
 
-## 0. Foundation (current)
+## Current checkpoint
 
-- Architecture/security/data/API/demo contracts and repository hygiene.
-- Workspace concepts and design tokens in `docs/UI_DESIGN.md`.
-- Evidence: docs, `.gitignore`, safe `.env.example`, initial README/log.
-- Remaining: private GitHub repository setup and origin/push.
+- Next.js sign-in and server-side route gate use Supabase Auth.
+- FastAPI query and citation routes validate the session and use the same user
+  token for database requests.
+- Gemini Embedding 2 and structured Gemini Flash adapters are implemented.
+- Claim validation binds each citation to the bounded evidence objects passed
+  to generation; unsupported citations fail closed.
+- Six focused RAG unit tests pass. Web lint and production build pass.
+- The database migration remains unapplied. Live Supabase/Gemini checks failed
+  at DNS resolution, and the Python runtime dependencies could not be
+  installed because package download DNS failed.
 
-## 1. App and database skeleton
+## Remaining phases
 
-- Create Next.js and FastAPI apps, local Supabase config, ordered migration,
-  typed environment settings, health endpoint, and synthetic seed plan.
-- Add dependency locks, basic lint/type checks, API unit test setup.
-- Exit: clean install/build and migration application in a Docker-enabled env.
-- Web scaffold and interactive preview exist. A FastAPI health skeleton and
-  first unified-index/RLS migration are drafted; local Supabase configuration,
-  migration execution, and database tests remain outstanding.
+1. **Database and authorization:** install/use Supabase CLI and Docker; validate
+   the current migration, add the required business schema and synthetic
+   records, apply it only after validation, then run database-backed allow and
+   deny tests.
+2. **Ingestion:** implement page-aware PDF extraction, OCR for images with
+   provenance, structured row normalization, private source preservation, and
+   an explicitly authorized transactional write path.
+3. **Demo identity:** create CEO, Finance, HR, Sales, and Engineer Supabase
+   users and switch between actual sessions in demo-only mode.
+4. **Complete product surfaces:** connect Overview, Knowledge, Ingestion,
+   Security, and Evaluation to real API/database state; do not fabricate
+   metrics or seed results as live data.
+5. **End-to-end proof:** run the four Acme query flows, finance allow, HR deny,
+   prompt attack denial, citation lookup, and exact model-context tests against
+   the applied database and real providers.
+6. **Delivery:** repeat dependency install, backend tests, frontend lint and
+   typecheck/build, migration checks, update this file and
+   `REVIEW_NEEDED.md`, then set up GitHub after `gh` is installed and
+   authenticated.
 
-## 2. Identity and authorization base
+## Deferred review
 
-- Supabase Auth session, profiles/roles/organizations, RLS policies, user-scoped
-  API database access, role-specific demo identities.
-- Exit: database allow and deny tests for finance/HR/organization boundaries.
-  The drafted migration is not proof of authorization until tested against
-  PostgreSQL with authenticated Supabase JWTs.
-
-## 3. Unified ingestion
-
-- PDF parsing, image OCR, and structured-row adapters all emit `KnowledgeUnit`.
-- Store originals privately; preserve provenance/ACL; make ingestion idempotent.
-- Exit: fixtures of each source type pass validation and map to one index.
-
-## 4. Embeddings and unified retrieval
-
-- Gemini provider adapter with configurable model/dimension; pgvector and
-  full-text search; one `SecureRetriever`; rank fusion.
-- Exit: cross-modal authorized retrieval and filtered-search recall evidence.
-
-## 5. Grounded generation and citations
-
-- Gemini Flash adapter, typed output, immutable authorized context, citation
-  validation, insufficient-evidence behavior, exact source lookup.
-- Exit: evidence-context tests, citation tests, malformed/provider failure tests.
-
-## 6. Judge UI and demo
-
-- The first workspace screen is implemented from the generated concepts; then
-  build responsive accessible chat, source preview, trace, demo identity switch,
-  and measured evaluation view against real API state. A generated concept set
-  now exists; the Superdesign CLI was unavailable during preflight.
-- Exit: allowed and denied live demo flows with keyboard-friendly controls.
-
-## 7. Evaluation and review
-
-- Versioned retrieval set, latency/query-plan measurements, security tests,
-  setup docs, attribution, development log, and bounded architecture review.
-- Exit: report only executed evidence, document remaining review issues, tag
-  the ~70% milestone only if every acceptance item is demonstrated.
-
-## Deferred
-
-Advanced reranking, performance tuning, production hardening, deployment,
-complex policy exceptions, and final adversarial/RLS audit remain deferred to
-measured need or deeper review. Do not mark the project competition-ready
-without those reviews and observed test evidence.
+Filtered HNSW recall, security-definer concerns, role/tenant edge cases, and
+performance/concurrency review remain documented in `REVIEW_NEEDED.md` for the
+stronger security pass.

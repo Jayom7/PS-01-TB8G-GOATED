@@ -41,14 +41,17 @@ HNSW is the initial approximate index candidate. Selective filters can reduce
 
 ## Grounded generation
 
-The model receives only evidence records produced by the secured retrieval
-operation. The prompt labels source text as untrusted reference material and
-asks for a structured response containing claims and proposed evidence IDs.
-Pydantic validates output shape. A deterministic citation validator checks
-that all IDs are present in the exact prompt evidence, authorized for the
-request, and tied to a precise page, row, or region. Every factual claim must
-have at least one valid citation. Unsupported claims are rejected; insufficient
-support produces a controlled response. No general model knowledge fills gaps.
+The model receives only evidence records produced by the retrieval operation.
+The prompt labels source text as untrusted reference material and asks for a
+structured response containing claims and proposed evidence IDs. A
+deterministic citation validator checks that IDs are present in the exact
+prompt evidence and tied to a precise page, row, or region. This checks
+citation membership and provenance; it does not prove semantic entailment.
+The API therefore reports `CITATION_VALIDATED`, not a claim that semantic
+grounding is verified. Entailment validation and a measured grounded-answer
+evaluation remain required before making that claim. No general model
+knowledge is intentionally invited to fill gaps, but prompt wording is not
+proof that it did not do so.
 
 ## Provider contracts
 

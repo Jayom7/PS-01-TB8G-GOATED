@@ -77,8 +77,37 @@
 
 - Install GitHub CLI and authenticate with `gh auth login` before creating the
   private GitHub repository and pushing.
-- Install Docker Desktop (or another Docker-compatible runtime) before using
-  Supabase local development or Docker-based integration checks.
-- Supply Gemini and Supabase project credentials before live provider/database
-  integration; no actual provider credentials were inspected. The example file
-  now contains blank values only.
+- Install Docker Desktop (or another Docker-compatible runtime) and the
+  Supabase CLI before local migration validation.
+- Local Gemini and Supabase credentials are populated and the public Supabase
+  values match across the root and web config. A read-only live check could
+  not resolve either provider hostname (`ENOTFOUND`); do not treat this as
+  credential acceptance or rejection.
+
+## 2026-10-08 — Authenticated query slice
+
+- Added Supabase password sign-in, a server-side `getClaims()` route gate, and
+  sign-out. The query request schema rejects extra identity, role, organization,
+  ACL, or evidence fields.
+- Added FastAPI query and source-lookup routes. Authentication is checked with
+  Supabase Auth; retrieval and source lookup forward the same user bearer token
+  with the publishable key. The secret key is not used by these paths.
+- Added Gemini Embedding 2 and structured Gemini Flash REST adapters, bounded
+  model context, server-constructed citations, and fail-closed claim
+  validation. The embedding REST response shape was checked against the
+  [official Gemini API reference](https://ai.google.dev/api/embeddings).
+- Replaced the hackathon preview UI with the Clearframe identity, real
+  session-aware Ask surface, citation lookup, and honest setup states. The
+  role switch remains absent until seeded users and real session switching
+  exist. Added a new design concept at `docs/design/workspace-clearframe.png`.
+- Normalized ignored `apps/web/.env.local` to the public Supabase pair plus
+  `NEXT_PUBLIC_API_BASE_URL`; server-only keys remain in the ignored root
+  `.env`. No values were printed or committed.
+- Verification: six standard-library RAG unit tests passed; Python source
+  compilation and `git diff --check` passed; `pnpm lint` and
+  `pnpm build` passed. Browser inspection showed the sign-in form and verified
+  an unauthenticated request to `/` redirects to `/login`.
+- Blockers: the API dependency install failed resolving the package index;
+  Supabase and Gemini provider checks also failed DNS resolution. Docker,
+  Supabase CLI, and `gh` are missing. No migration, live auth, provider call,
+  database allow/deny test, ingestion flow, or GitHub setup was verified.

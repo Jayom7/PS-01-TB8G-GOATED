@@ -1,47 +1,45 @@
-# API Specification (Planned)
+# API Contract
 
-Base path: `/api/v1`. All user endpoints require a Supabase Auth bearer token.
-Identity, organization, and role are derived server-side. Client-supplied
-`user_id`, `role`, `organization_id`, ACL, or source authorization are never
-proof of access.
+Base path: `/api/v1`. User endpoints require a Supabase Auth bearer session.
+The API validates the session through Supabase Auth and forwards the same
+token to user-scoped database requests. Client-supplied user, role,
+organization, ACL, and evidence values are never authorization proof.
 
-## Errors
+## Implemented
 
-Return `{ "error": { "code": "...", "message": "...", "request_id": "..." } }`.
-Use stable generic messages for inaccessible and nonexistent resources. Do not
-return hidden titles, IDs, snippets, counts, or policy details. Validation
-errors may identify invalid input fields but must not echo protected data.
+- `GET /health`: liveness only; it does not validate providers or database.
+- `POST /chat/query` (`/api/v1/chat/query`): accepts `{ "query": string }`;
+  extra fields are rejected. Returns `request_id`, a citation-validation state, validated
+  claims with server-built citations, and a minimal safe trace.
+- `GET /sources/{citation_id}` (`/api/v1/sources/{source_id}`): resolves one
+  chunk under the current user session. Missing and RLS-hidden rows share a
+  404 response.
 
-## Endpoints
+The query path uses the user's session for retrieval; it does not use
+`SUPABASE_SECRET_KEY`. The migration and provider requests remain unverified in
+the live project.
 
-- `GET /health`: liveness/readiness metadata without secrets or database rows.
-- `POST /chat/query`: `{query, conversation_id?}` → answer state, validated
-  claims, citations, request ID, and safe retrieval trace. No client-supplied
-  role or evidence. Responses support `answered` and `insufficient_evidence`.
-- `GET /sources/{source_id}`: authorized exact source metadata and preview
-  location only; inaccessible and absent IDs share the same response.
-- `POST /ingestion/jobs`: administrative scope only; accepts an allowlisted
-  source reference or upload and returns job ID/state. This path uses separate
-  authorization and credential handling.
-- `GET /ingestion/jobs/{job_id}`: caller may see only jobs they can administer.
-- `GET /demo/identities`: list synthetic demo identities only in demo mode.
-- `POST /demo/session`: select a seeded demo identity through a server-verified
-  demo mechanism; disabled outside explicit demo configuration.
-- `GET /security/trace/{request_id}`: safe trace for the requesting user or
-  authorized reviewer; no denied-resource detail.
-- `GET /evaluation/summary`: measured evaluation results and run/config IDs;
-  no hardcoded percentages.
+## Query result
 
-## Query contract
+`state` is `CITATION_VALIDATED`, `PARTIALLY_CITATION_VALIDATED`, or
+`INSUFFICIENT_EVIDENCE`.
+Claims contain text and citation objects built only from the exact bounded
+evidence context sent to generation. Model-proposed IDs that were not in that
+context are discarded. PDF citations need a page; structured citations need a
+table and row; image citations need an image ID and include OCR region metadata
+when available. Citation validation proves ID membership and source-location
+shape; it does not prove that the cited passage semantically entails the claim.
 
-Response claims are `{text, citation_ids[]}`. Each citation includes stable
-source ID, source type, display-safe title, exact location (page, row, or OCR
-region), and a server-generated preview reference. The API emits only citations
-validated against the retrieved authorized evidence context. Empty support
-returns the fixed insufficient-evidence state.
+The trace reports that the session was verified, that the database request
+used that session, and how many evidence objects were passed to generation. It
+does not report denied-resource details.
 
-## Operational behavior
+## Planned, not implemented
 
-Validate payload lengths, MIME types, and pagination bounds. Apply bounded
-timeouts and provider error mapping. Query/source responses carry request IDs.
-No raw model output is forwarded before schema and citation validation.
+- `POST /ingestion/jobs` and `GET /ingestion/jobs/{job_id}`
+- `GET /demo/identities` and `POST /demo/session`
+- `GET /security/trace/{request_id}`
+- `GET /evaluation/summary`
+
+These routes require a validated authorization/data model before they are
+exposed. No evaluation metrics or demo users are fabricated.

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PS-01 · Secure Knowledge Workspace",
-  description: "A multimodal retrieval workspace concept for Code Carnival 3.0.",
+  title: "Clearframe · Secure Knowledge Workspace",
+  description: "A secure workspace for evidence-grounded enterprise knowledge.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

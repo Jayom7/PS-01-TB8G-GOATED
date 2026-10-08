@@ -1,16 +1,24 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file="../../.env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=REPOSITORY_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     environment: str = "development"
+    web_origin: str = "http://localhost:3000"
     supabase_url: str | None = None
-    supabase_anon_key: SecretStr | None = None
-    supabase_service_role_key: SecretStr | None = None
+    supabase_publishable_key: SecretStr | None = None
+    supabase_secret_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
     gemini_embedding_model: str = "gemini-embedding-2"
     embedding_dimensions: int = 1536

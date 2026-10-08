@@ -92,6 +92,8 @@ create index access_grants_chunk on public.access_grants (chunk_id) where can_re
 
 alter table public.profiles enable row level security;
 alter table public.user_roles enable row level security;
+alter table public.organizations enable row level security;
+alter table public.roles enable row level security;
 alter table public.documents enable row level security;
 alter table public.knowledge_chunks enable row level security;
 alter table public.access_grants enable row level security;
@@ -146,10 +148,11 @@ create policy "chunks_read_authorized" on public.knowledge_chunks
   );
 
 grant usage on schema public to authenticated;
+revoke all on public.organizations, public.roles, public.profiles,
+  public.user_roles, public.documents, public.knowledge_chunks,
+  public.access_grants from anon, authenticated;
 grant select on public.profiles, public.user_roles, public.documents,
   public.knowledge_chunks, public.access_grants to authenticated;
-revoke insert, update, delete on public.profiles, public.user_roles,
-  public.documents, public.knowledge_chunks, public.access_grants from authenticated;
 
 -- RLS applies inside this invoker function before rows can be returned to the API or LLM.
 create or replace function public.match_knowledge_chunks(
@@ -204,4 +207,5 @@ as $$
 $$;
 
 revoke all on function public.match_knowledge_chunks(extensions.vector, text, integer) from public;
+revoke all on function public.match_knowledge_chunks(extensions.vector, text, integer) from anon, authenticated;
 grant execute on function public.match_knowledge_chunks(extensions.vector, text, integer) to authenticated;

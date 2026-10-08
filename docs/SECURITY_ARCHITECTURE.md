@@ -10,12 +10,12 @@ the API/provider boundary. Uploaded documents and model output are untrusted.
 
 ## Identity and policy
 
-Supabase Auth is the planned identity provider. FastAPI validates JWT signature,
-issuer, audience, and expiry using the trusted project configuration. User ID,
-organization membership, roles, and grants are resolved from trusted claims or
-database records, never from request fields. Demo role switching must select a
-real seeded demo identity/session rather than overwrite a role label in client
-state.
+Supabase Auth is the identity provider. FastAPI asks the Auth user endpoint to
+validate the bearer session before using it. User ID, organization membership,
+roles, and grants must come from the validated session and database records,
+never from request fields. The current query route does not accept identity or
+role fields. Demo role switching must select a real seeded demo identity/session
+rather than overwrite a role label in client state.
 
 Authorization is default-deny and combines organization boundary, subject or
 role grant, resource/source ACL, and classification. Document grants may flow
@@ -32,11 +32,12 @@ credential and then filter in the API. RLS is defense in depth and the
 database tests must prove both authorized retrieval and absence of denied
 rows in the exact evidence context passed to generation.
 
-The ingestion path is separate, server-only, and least-privileged for its
-write duties. Any future privileged database function requires a narrow
-contract, non-exposed schema where possible, pinned empty `search_path`, fully
-qualified objects, explicit execute grants, and dedicated abuse tests. Avoid
-security-definer functions unless the measured design requires one.
+An ingestion path is not implemented. Any future privileged path must be
+separate, server-only, and narrowly authorized for its write duties. Any future
+privileged database function requires a narrow contract, non-exposed schema
+where possible, pinned empty `search_path`, fully qualified objects, explicit
+execute grants, and dedicated abuse tests. Avoid security-definer functions
+unless the measured design requires one.
 
 ## Metadata and side-channel handling
 
@@ -50,31 +51,32 @@ as retrieval.
 
 ## Generation and citation controls
 
-Only the immutable authorized context is sent to the model. Document text is
-treated as untrusted data, not instructions. The generation schema contains
-answer claims plus references to supplied evidence IDs; model-generated IDs
-are merely proposals. A deterministic validator checks that each factual
-claim has one or more retrieved, authorized context entries and a precise
-location. Invalid or unsupported claims are removed; if nothing supported
-remains, return insufficient evidence. Provider failure, malformed output,
-and timeout also fail closed without expanding context.
+Only the exact bounded retrieval response is sent to the model; database
+authorization for that response remains unverified until RLS tests pass.
+Document text is treated as untrusted data, not instructions. Model-generated
+IDs are merely proposals. The current deterministic validator checks ID
+membership and source-location shape; it does not verify that a cited passage
+entails the claim. The API reports citation validation accordingly. Semantic
+claim support, provider failure behavior, and prompt-injection resistance still
+need explicit tests. No context expansion or automatic retry occurs.
 
 ## Secrets and operational controls
 
 Secrets are read at runtime from environment/secret storage. Gemini and
-Supabase service-role credentials remain server-side; the browser receives
-only the public Supabase URL and anon key. Do not log tokens, secrets, raw
-prompts, or protected source text. Upload validation, file-size/type limits,
-rate limits, request IDs, and bounded provider timeouts are implementation
-requirements.
+`SUPABASE_SECRET_KEY` remain server-side; the browser receives only the public
+Supabase URL and publishable key. The current user-query and source-lookup paths
+do not use the secret key. Do not log tokens, secrets, raw prompts, or
+protected source text. Upload validation, file-size/type limits, rate limits,
+request IDs, and bounded provider timeouts remain requirements for the
+unimplemented ingestion path.
 
 ## Verification gate
 
 Before describing the prototype as enforcing retrieval-time authorization,
 tests must capture the exact objects passed to the model and assert that every
-one is authorized. Database tests must cover cross-role and cross-organization
-denials, denied metadata/source lookup, manipulated IDs/claims, and the normal
-authorized path. Draft RLS policies and an invoker retrieval function now
-exist, but no database-backed authorization test or evidence-context test has
-run. The draft is not evidence that the system currently enforces these
-controls.
+one is authorized. Six local unit tests cover bounded model context and
+citation filtering, but they do not exercise PostgreSQL or Supabase RLS.
+Database tests must cover cross-role and cross-organization denials, denied
+metadata/source lookup, manipulated IDs/claims, and the normal authorized path.
+The draft migration has not been applied; it is not evidence that the system
+currently enforces these controls.

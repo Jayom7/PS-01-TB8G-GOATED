@@ -1,53 +1,31 @@
-# UI Design Direction
+# Clearframe UI Direction
 
-## Concept references
+## Product identity
 
-- [Primary finance workspace](design/workspace-desktop.png)
-- [Insufficient-authorized-evidence state](design/workspace-denied.png)
-- [Responsive mobile workspace and evidence sheet](design/workspace-mobile.png)
+Clearframe is a restrained security-oriented enterprise knowledge workspace.
+The application surface contains no university, hackathon, judge, or preview
+branding. Synthetic records are not presented as connected production data.
 
-The concepts were generated from the user brief because the Superdesign CLI
-preflight remained silent and had to be stopped. They are implementation
-references, not proof of functionality. Synthetic sample details in the
-concept images must be normalized to one internally consistent demo fixture.
+## Concept
 
-## Design system
+- [Clearframe Ask workspace](design/workspace-clearframe.png)
+- Earlier PS-01 concepts remain in `docs/design/` as historical references;
+  they contain branding and sample details that should not be copied.
 
-- **Canvas:** true white (`#FFFFFF`), cool near-white (`#F7F9FC`) only for
-  selected/soft utility surfaces.
-- **Text:** deep navy (`#0A1B3A`) for primary, muted blue-gray (`#52627B`) for
-  secondary.
-- **Accent:** clear medium blue (`#1458D4`) for links, selected navigation,
-  citation markers, and primary action.
-- **Authorization:** quiet green (`#16834B`) only when a retrieved source has
-  passed the real server-side policy check.
-- **Borders:** cool pale gray-blue (`#DCE3EE`); avoid heavy shadows.
-- **Type:** clean sans serif for controls and body; answer text can use a
-  restrained serif only if it remains readable and matches the final concept.
-- **Geometry:** slim top bar, 220–260px navigation rail, flexible open chat
-  column, 400–450px evidence inspector at desktop widths. Use vertical rules
-  and whitespace rather than nested cards.
-- **Controls:** compact, high-contrast, keyboard-visible focus. No invented
-  metrics, security badges, decorative illustrations, or random gradients.
+The Clearframe concept sets a white canvas, deep navy type, one blue accent,
+pale cool-gray separators, a slim top bar, a left navigation rail, an open
+question workspace, and a right evidence inspector. Product UI, citations,
+controls, and text are implemented in code rather than shipped as a screenshot.
 
-## Primary components and states
+## Current implemented surface
 
-- Navigation rail with real demo identity selector and Chat/Sources/Ingestion/
-  Evaluation destinations.
-- Central conversation with query, grounded claims, inline source references,
-  insufficient-evidence response, and bottom composer.
-- Evidence inspector with only authorized sources and exact page/row/region;
-  source preview opens from a citation.
-- Safe trace shows identity verification, policy application, and selected
-  authorized evidence only. It never lists denied sources or hidden counts.
-- On mobile, collapse navigation behind a menu and expose evidence as a
-  bottom sheet; keep the composer reachable and controls thumb-friendly.
+- Supabase sign-in form and a server-side authenticated route gate.
+- Six workspace destinations: Overview, Ask, Knowledge, Ingestion, Security,
+  and Evaluation.
+- Live query and source lookup controls are connected to the FastAPI contract.
+- Empty/setup states identify database, ingestion, policy-validation, and
+  evaluation work that is not yet connected.
 
-## Copy and data lock
-
-Keep the concept's primary title and source navigation. Build a consistent
-synthetic finance fixture before presenting dollar values or dates; the
-generated desktop and mobile concepts contain inconsistent sample amounts and
-must not be treated as source data. No fabricated evaluation metrics are
-allowed. Status text such as “Authorized” may appear only after an actual
-server decision.
+The demo identity switch remains absent until it can switch to actual seeded
+Supabase sessions. A client-side role selector would not establish identity or
+authorization.

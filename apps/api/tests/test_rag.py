@@ -213,6 +213,128 @@ class SecureRagTests(unittest.TestCase):
         )
         self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
 
+    def validate_claim(self, text, supports, evidence=None, references=None):
+        return validate_generation(
+            {
+                "claims": [
+                    {
+                        "text": text,
+                        "citation_ids": references
+                        or list(dict.fromkeys(item[0] for item in supports)),
+                        "supporting_quotes": [
+                            {"citation_id": citation_id, "quote": quote}
+                            for citation_id, quote in supports
+                        ],
+                    }
+                ]
+            },
+            evidence or [self.finance_row],
+        )
+
+    def test_paid_unpaid_contradictions_are_rejected_in_both_directions(self):
+        for content, claim in [
+            ("Acme invoice is unpaid.", "Acme invoice is paid."),
+            ("Acme invoice is paid.", "Acme invoice is unpaid."),
+            ("Acme invoice has not been paid.", "Acme invoice is paid."),
+        ]:
+            with self.subTest(content=content):
+                row = {**self.finance_row, "content": content}
+                result = self.validate_claim(claim, [(row["chunk_id"], content)], [row])
+                self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
+    def test_fabricated_second_quote_cannot_contribute_support(self):
+        result = self.validate_claim(
+            "Acme invoice amount is USD 999,999.",
+            [
+                (self.finance_row["chunk_id"], "Acme"),
+                (self.finance_row["chunk_id"], "Acme invoice amount is USD 999,999."),
+            ],
+        )
+        self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
+    def test_contradictory_second_quote_cannot_contribute_support(self):
+        result = self.validate_claim(
+            "Acme invoice is paid.",
+            [
+                (self.finance_row["chunk_id"], "Acme"),
+                (self.finance_row["chunk_id"], "Acme invoice is paid."),
+            ],
+        )
+        self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
+    def test_paid_quote_does_not_match_inside_unpaid(self):
+        result = self.validate_claim(
+            "Acme is paid.",
+            [
+                (self.finance_row["chunk_id"], "Acme"),
+                (self.finance_row["chunk_id"], "paid"),
+            ],
+        )
+        self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
+    def test_valid_multiple_source_claim_preserves_both_citations(self):
+        second = {
+            **self.finance_row,
+            "chunk_id": "second",
+            "source_type": "pdf",
+            "page_number": 2,
+            "content": "Acme contract payment terms are net 30 days.",
+        }
+        result = self.validate_claim(
+            "Acme has USD 48,000 unpaid and contract terms are net 30 days.",
+            [
+                (self.finance_row["chunk_id"], self.finance_row["content"]),
+                (second["chunk_id"], second["content"]),
+            ],
+            [self.finance_row, second],
+        )
+        self.assertEqual(result["state"], "CITATION_VALIDATED")
+        self.assertEqual(len(result["claims"][0]["citations"]), 2)
+
+    def test_multiple_sources_do_not_rescue_a_fabricated_quote(self):
+        second = {**self.finance_row, "chunk_id": "second"}
+        result = self.validate_claim(
+            "Acme invoice is paid.",
+            [
+                (self.finance_row["chunk_id"], self.finance_row["content"]),
+                (second["chunk_id"], "Acme invoice is paid."),
+            ],
+            [self.finance_row, second],
+        )
+        self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
+    def test_mixed_authorized_and_unauthorized_citations_reject_entire_claim(self):
+        result = self.validate_claim(
+            "Acme invoice is unpaid.",
+            [
+                (self.finance_row["chunk_id"], self.finance_row["content"]),
+                ("unauthorized", "Acme invoice is unpaid."),
+            ],
+        )
+        self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
+    def test_valid_grounded_answer_with_multiple_exact_quotes(self):
+        result = self.validate_claim(
+            "Acme has USD 48,000 unpaid.",
+            [
+                (self.finance_row["chunk_id"], "Acme"),
+                (self.finance_row["chunk_id"], "USD 48,000 | unpaid"),
+            ],
+        )
+        self.assertEqual(result["state"], "CITATION_VALIDATED")
+
+    def test_conflicting_verified_payment_statuses_fail_closed(self):
+        row = {**self.finance_row, "content": "Acme invoice unpaid. Acme invoice paid."}
+        result = self.validate_claim(
+            "Acme invoice is paid.",
+            [
+                (row["chunk_id"], "Acme invoice unpaid."),
+                (row["chunk_id"], "Acme invoice paid."),
+            ],
+            [row],
+        )
+        self.assertEqual(result["state"], "INSUFFICIENT_EVIDENCE")
+
 
 if __name__ == "__main__":
     unittest.main()

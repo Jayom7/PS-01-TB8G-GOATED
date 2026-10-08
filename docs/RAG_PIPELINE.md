@@ -14,8 +14,8 @@
   privileged writer. Originals are private local files. There is no background
   ingestion-job progress API.
 - Prior local PDF, scanned-page OCR, image OCR, structured ingestion, and source
-  preview checks are recorded in `REVIEW_NEEDED.md`; the OCR engine and database
-  are not rerun in the current blocked runtime session.
+  preview checks are recorded in `REVIEW_NEEDED.md`; the OCR engine has not been rerun in Phase 1. The running local database and
+  five-role authorization boundaries have been freshly checked.
 
 ## Query and retrieval
 
@@ -43,7 +43,8 @@ unverified; see `REVIEW_NEEDED.md`.
 The prompt treats retrieved text as untrusted data. The model must return a
 claim, citation IDs, and an exact short supporting quote for each cited
 passage. The deterministic validator checks IDs against the exact context,
-quote inclusion after whitespace normalization, a 0.35 token-overlap threshold
+every quote's inclusion after whitespace normalization with word boundaries,
+a bounded paid/unpaid contradiction guard, a 0.35 token-overlap threshold
 after stop-word removal, and the existence of source-specific citation
 locations. The public response contains only claim text and citations rebuilt
 from retrieved rows.
@@ -67,9 +68,12 @@ deterministic checks passed, not that semantic truth is verified.
 
 ## Evaluation
 
-The local suite measures retrieval relevance, rank, source modality, forbidden
-source hits, authorization violations, citation provenance, and latency; it
+The local suite measures positive-query hit rate, rank, source modality, checked forbidden
+source hits, retrieved citation-location presence, and latency; it
 does not score semantic answer quality. Previous six-case local results
-(Recall@12 1.0, MRR 0.775, zero measured authorization violations, 39
-provenance checks) are historical, small, and synthetic—not a representative
-benchmark. Current rerun requires local Supabase access.
+(hit rate@12 1.0, MRR 0.775, zero forbidden hits in the checked cases,
+39 retrieved rows with citation ID/location present) are historical, small, and synthetic—not a representative
+benchmark. Legacy result labels are corrected on read without modifying saved files or
+claiming a rerun. Fresh runs use schema version 2; location presence does not
+prove generated-answer provenance or entailment. The fresh security suite is
+separate from these small retrieval metrics.

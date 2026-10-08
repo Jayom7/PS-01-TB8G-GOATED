@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1536
     gemini_chat_model: str = "gemini-3.8-flash"
     gemini_fallback_chat_model: str = "gemini-3.7-flash"
+    gemini_additional_fallback_chat_models: list[str] = Field(
+        default_factory=lambda: [
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+        ]
+    )
 
 
 @lru_cache

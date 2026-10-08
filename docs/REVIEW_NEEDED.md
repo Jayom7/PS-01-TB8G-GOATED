@@ -3,26 +3,27 @@
 Status snapshot: 2026-10-08. This file distinguishes repository facts,
 historical run evidence, and current blockers. It is not a security certificate.
 
-## Current runtime blockers
+## Current Phase 1 state
 
-- **Docker:** `docker` client is installed, but `docker info` fails while
-  connecting to `/Users/Jayom/.docker/run/docker.sock` with permission denied.
-  The local Supabase server cannot be verified or started in this session.
-- **Supabase CLI:** root manifest declares `supabase` as a dev dependency, but
-  `node_modules/.bin/supabase` is absent/broken in this checkout. The dependency
-  install flow has not been rerun. No remote-database fallback is appropriate.
-- **API/web:** Python environment and web Next executable are present. This
-  pass has not started either server; prior API/web/browser results below are
-  historical, not live checks of the modified code.
-- **Gemini:** earlier real attempts reached retrieval but Gemini returned 429.
-  No new live call was made in this pass. Dashboard status means configured,
-  not available. The code now stops after one request on 429 and returns a
-  rate-limit-specific safe error.
-- **Hosted Supabase:** hosted migration/policies remain unverified; no hosted
-  credentials or CLI authorization were used.
-- The ignored owner-only `.local-demo-credentials.json` and
-  `data/local/evaluation.json` exist. Their contents were not disclosed or
-  committed. The five passwords remain local in the ignored credentials file.
+- Docker and the local Supabase containers are running. Both repository migrations
+  are applied. The earlier socket error was a sandbox restriction, not evidence
+  that Docker was stopped. The restored repository CLI is version 2.120.0.
+- API/web have been rebuilt and restarted from this checkout. The live Security
+  page now says RLS status was not checked by that endpoint and unauthorized
+  evidence is not independently measured. It does not show an unmeasured zero.
+- Fresh pgTAP: 24/24. Fresh five-role local manifest allow/deny, stored-vector RPC,
+  allowed/forbidden source lookup, forged CEO context, and CEO identity/context
+  preservation checks passed. Stored-vector smoke checks are not fresh query
+  embedding or a representative retrieval benchmark.
+- The controlled real Gemini attempt embedded the question and retrieved
+  authorized evidence, but generation returned HTTP 503 after the fallback path.
+  No generated answer/source-inspection success or HR refusal is claimed.
+- Fresh schema-2 retrieval evaluation: hit rate@12 0.75, MRR 0.625, zero
+  forbidden hits in the checked cases, 47/47 citation-location presence. The
+  structured-finance query missed its expected source; this is not a full pass.
+- Hosted Supabase remains unverified. No hosted migration or credentials were used.
+- See `PHASE1_VERIFICATION.md` and ignored `data/local/security-verification.json`
+  for the fresh evidence, separate from prior recorded runs.
 
 ## Historical local verification (do not present as current runtime proof)
 
@@ -30,8 +31,9 @@ Previous recorded sessions reported: local migration applied; 24 pgTAP
 assertions passed for grants/RLS/RPC, five-role allow/deny, forged context,
 cross-organization isolation, and unauthorized source lookup; local schema lint
 passed; 36 API tests and Ruff passed; six synthetic evaluation cases reported
-Recall@12 1.0, MRR 0.775, zero forbidden-source hits/authorization violations,
-and 39 citation provenance checks. Prior browser checks covered all six routes,
+hit rate@12 1.0 (previously mislabeled Recall@12), MRR 0.775, zero
+forbidden-source hits in the checked cases, and 39 retrieved citation ID/location
+presence checks (previously overstated as provenance checks). Prior browser checks covered all six routes,
 light/dark, role switching, and 1440x900 / 900x900 / 390x844. A prior real OCR
 invoice answer with citation succeeded once using Gemini 3.6; subsequent 3.8
 and 3.7 calls returned 429. These are historical notes and not a fresh
@@ -74,8 +76,8 @@ Generation now requests exact supporting excerpts per cited claim. The
 deterministic validator checks exact quote inclusion, coarse lexical overlap,
 citation membership in the bounded context, and citation location. This may
 reject paraphrases and does not prove entailment or detect every contradiction.
-Do not call it semantic grounding. No fresh Gemini answer or injection test was
-run in this pass.
+Do not call it semantic grounding. A fresh Gemini request failed with HTTP 503 during generation. No fresh answer
+or live injection outcome is claimed.
 
 **Stronger-model review:** design adversarial support/contradiction and prompt
 injection evaluation, calibrate quote/lexical checks against real outputs, and
@@ -102,8 +104,8 @@ Repository implements page-aware PDF extraction, scanned-page and image OCR,
 structured record normalization, embeddings, local private originals, and
 role-grant writes. Upload progress is atomic from the UI perspective; there is
 no verified per-stage server job status. This pass adds pre-OCR PNG/JPEG header
-dimension checks with a 16,000,000-pixel cap. Unit tests must pass before
-claiming that guard is verified. Prior local PDF/OCR/structured flows passed.
+dimension checks with a 16,000,000-pixel cap. Current unit tests verify the
+header guard; decoded-image behavior remains an open review item. Prior local PDF/OCR/structured flows passed.
 
 Hosted file storage, admin key lifecycle, transaction rollback, deletion and
 re-index behavior, request/rate limiting, and production background ingestion
@@ -111,12 +113,12 @@ need review before deployment.
 
 ## Required next evidence
 
-1. Restore access to the Docker socket and pinned repository CLI dependency;
-   start local Supabase and confirm migration/seed state.
-2. Run current backend tests/Ruff, web lint/typecheck/build, and browser QA on
-   all routes and responsive breakpoints.
-3. When Gemini quota returns, make one controlled finance query, inspect its
-   citation and authorized source excerpt, then repeat as HR and confirm
-   insufficient evidence. Do not retry 429 with the fallback model.
-4. Repeat local database authorization tests; hosted verification requires
-   separate hosted project access and review.
+1. Restore reliable Gemini generation, then run `run_local_demo.py` without
+   `--skip-generation` to complete the grounded answer/source inspection and HR
+   refusal checks. Do not loop on 429 or substitute mock success.
+2. Run an adversarial semantic-support and document-injection evaluation. The
+   fixed quote bypass and bounded paid/unpaid guard do not prove general entailment.
+3. Complete broader responsive UI and ingestion lifecycle verification before
+   submission; Phase 1 browser checks focus on the changed Security/Evaluation states.
+4. Hosted allow/deny verification requires separate project access; local results
+   do not establish hosted policies.

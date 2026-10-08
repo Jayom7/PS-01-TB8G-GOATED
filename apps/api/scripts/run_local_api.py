@@ -48,7 +48,7 @@ def main() -> None:
             "-m",
             "uvicorn",
             "--app-dir",
-            "src",
+            str(API_ROOT / "src"),
             "ps01_api.main:app",
             "--host",
             "127.0.0.1",

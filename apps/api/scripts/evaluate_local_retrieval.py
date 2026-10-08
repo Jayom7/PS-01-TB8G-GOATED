@@ -22,10 +22,10 @@ DOCKER_BIN = "/Applications/Docker.app/Contents/Resources/bin"
 TOP_K = 12
 CASES = [
     {
-        "name": "invoice amount across PDF and OCR",
+        "name": "invoice amount in OCR",
         "role": "Finance Manager",
         "query": "What amount is shown on Acme's scanned invoice?",
-        "expected": {"ACM-INV-2048-SCAN", "ACM-INV-2048-PDF"},
+        "expected": {"ACM-INV-2048-SCAN"},
     },
     {
         "name": "contract payment terms",
@@ -37,7 +37,7 @@ CASES = [
         "name": "exact invoice identifier",
         "role": "Finance Manager",
         "query": "Find invoice ACM-INV-2048 and report its due date.",
-        "expected": {"ACM-INV-2048-SCAN", "ACM-INV-2048-PDF", "nova-finance-records"},
+        "expected": {"ACM-INV-2048-SCAN", "nova-finance-records"},
     },
     {
         "name": "structured finance record",
@@ -50,7 +50,7 @@ CASES = [
         "role": "HR Manager",
         "query": "What amount is shown on Acme's scanned invoice?",
         "expected": set(),
-        "forbidden": {"ACM-INV-2048-SCAN", "ACM-INV-2048-PDF", "nova-finance-records"},
+        "forbidden": {"ACM-INV-2048-SCAN", "nova-finance-records"},
     },
 ]
 
@@ -178,6 +178,10 @@ async def run() -> dict[str, object]:
             }
         )
 
+    return summarize_results(results, retrieved_rows)
+
+
+def summarize_results(results: list[dict], retrieved_rows: list[dict]) -> dict[str, object]:
     positive = [row for row, case in zip(results, CASES, strict=False) if case.get("expected")]
     cited = [citation_from_row(row) for row in retrieved_rows]
     citation_checks = [bool(item.get("citation_id") and item.get("location")) for item in cited]
@@ -189,10 +193,13 @@ async def run() -> dict[str, object]:
         if isinstance(row.get("latency_ms"), (int, float))
     ]
     return {
+        "schema_version": 2,
+        "scope": "local-synthetic-retrieval",
         "dataset": "novacore-synthetic-v1",
         "top_k": TOP_K,
         "query_count": len(CASES),
-        "retrieval_recall_at_k": round(
+        "positive_query_count": len(positive),
+        "retrieval_hit_rate_at_k": round(
             sum(bool(row["hit"]) for row in positive) / len(positive), 3
         ),
         "mean_reciprocal_rank": round(
@@ -207,12 +214,28 @@ async def run() -> dict[str, object]:
         "measured_checks": {
             "ocr_retrieval": "image_ocr" in invoice_modalities,
             "structured_record_retrieval": bool(structured_result["hit"]),
-            "cross_modal_retrieval": {"pdf", "image_ocr"}.issubset(invoice_modalities),
-            "citation_provenance_valid": sum(citation_checks),
-            "citation_provenance_checked": len(citation_checks),
+            "cross_modal_retrieval": {"image_ocr", "structured"}.issubset(invoice_modalities),
+            "retrieved_citation_locations_present": sum(citation_checks),
+            "retrieved_citation_locations_checked": len(citation_checks),
             "mean_latency_ms": round(sum(latency_values) / len(latency_values), 1)
             if latency_values
             else None,
+        },
+        "metric_definitions": {
+            "retrieval_hit_rate_at_k": (
+                "Fraction of positive queries with any expected source in top k; not recall."
+            ),
+            "mean_reciprocal_rank": (
+                "Mean reciprocal rank of the first expected source over positive queries."
+            ),
+            "retrieved_citation_locations_present": (
+                "Retrieved rows with nonempty citation ID and location; "
+                "not answer provenance or entailment."
+            ),
+            "authorization_violations": (
+                "Forbidden-source hits in these cases plus the direct HR table checks; "
+                "not a global security count."
+            ),
         },
         "results": results,
     }

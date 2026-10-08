@@ -379,7 +379,7 @@ async def workspace_summary(
             saved_evaluation = json.loads(EVALUATION_RESULTS.read_text())
             latest_evaluation_status = (
                 "recorded pass (not freshly run)"
-                if saved_evaluation.get("authorization_violations") == 0
+                if evaluation_checks_passed(saved_evaluation)
                 else "recorded review (not freshly run)"
             )
         except (OSError, ValueError, AttributeError):
@@ -485,10 +485,42 @@ async def get_evaluation(
         await _context_token(client, settings, token, identity, demo_role)
     if EVALUATION_RESULTS.is_file():
         try:
-            return {"state": "completed", "result": json.loads(EVALUATION_RESULTS.read_text())}
+            result = json.loads(EVALUATION_RESULTS.read_text())
+            if not isinstance(result, dict):
+                return {"state": "unavailable", "result": None}
+            return {"state": "completed", "result": recorded_evaluation(result)}
         except (OSError, ValueError):
             return {"state": "unavailable", "result": None}
     return {"state": "not_run", "result": None}
+
+
+def evaluation_checks_passed(result: dict[str, object]) -> bool:
+    rows = result.get("results")
+    return (
+        result.get("authorization_violations") == 0
+        and isinstance(rows, list)
+        and bool(rows)
+        and all(isinstance(row, dict) and row.get("hit") is True for row in rows)
+    )
+
+
+def recorded_evaluation(result: dict[str, object]) -> dict[str, object]:
+    """Relabel legacy metrics without modifying or claiming to rerun saved data."""
+    saved = dict(result)
+    saved["run_kind"] = (
+        "recorded_local" if saved.get("schema_version") == 2 else "historical_legacy"
+    )
+    if "retrieval_recall_at_k" in saved:
+        saved["retrieval_hit_rate_at_k"] = saved.pop("retrieval_recall_at_k")
+    checks = dict(saved.get("measured_checks") or {})
+    for old, new in (
+        ("citation_provenance_valid", "retrieved_citation_locations_present"),
+        ("citation_provenance_checked", "retrieved_citation_locations_checked"),
+    ):
+        if old in checks:
+            checks[new] = checks.pop(old)
+    saved["measured_checks"] = checks
+    return saved
 
 
 class DemoSwitchRequest(BaseModel):
@@ -771,13 +803,18 @@ async def run_evaluation(
         result = await module["run"]()
         result["completed_at"] = datetime.now(UTC).isoformat()
         EVALUATION_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        if EVALUATION_RESULTS.is_file():
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            archive = EVALUATION_RESULTS.with_name(f"evaluation-history-{stamp}.json")
+            archive.write_bytes(EVALUATION_RESULTS.read_bytes())
+            archive.chmod(0o600)
         EVALUATION_RESULTS.write_text(json.dumps(result, indent=2) + "\n")
         EVALUATION_RESULTS.chmod(0o600)
     except Exception as exc:
         raise HTTPException(
             status_code=503, detail="Evaluation failed; no result was saved"
         ) from exc
-    return {"state": "completed", "result": result}
+    return {"state": "completed", "result": result | {"run_kind": "fresh_local"}}
 
 
 @app.post("/api/v1/chat/query", response_model=QueryResponse, tags=["chat"])

@@ -79,22 +79,36 @@ def validate_generation(output: dict[str, Any], evidence: list[dict[str, Any]]) 
         ):
             rejected = True
             continue
-        valid_ids = list(dict.fromkeys(str(value) for value in references if str(value) in by_id))
-        if not valid_ids:
+        # Reject the entire claim if any reference is outside the authorized,
+        # bounded model context. Do not silently launder mixed references.
+        if not references or any(
+            not isinstance(value, str) or value not in by_id for value in references
+        ):
             rejected = True
             continue
+        valid_ids = list(dict.fromkeys(references))
         quotes_by_id: dict[str, list[str]] = {}
+        invalid_quote = False
         for support in supporting_quotes:
             if not isinstance(support, dict):
-                continue
+                invalid_quote = True
+                break
             citation_id, quote = support.get("citation_id"), support.get("quote")
-            if isinstance(citation_id, str) and isinstance(quote, str):
-                quotes_by_id.setdefault(citation_id, []).append(quote)
+            if citation_id not in valid_ids or not isinstance(quote, str) or not quote.strip():
+                invalid_quote = True
+                break
+            quotes_by_id.setdefault(citation_id, []).append(quote)
         valid_support = all(
             _has_matching_support(statement, by_id[citation_id], quotes_by_id.get(citation_id, []))
             for citation_id in valid_ids
         )
-        if not valid_support:
+        verified_support = " ".join(quote for quotes in quotes_by_id.values() for quote in quotes)
+        claim_statuses = _payment_statuses(statement)
+        support_statuses = _payment_statuses(verified_support)
+        # A bounded payment-status guard, not general semantic entailment.
+        # Conflicting or absent status support must not validate paid/unpaid claims.
+        status_supported = not claim_statuses or claim_statuses == support_statuses
+        if invalid_quote or not valid_support or not status_supported:
             rejected = True
             continue
         citations = [citation_from_row(by_id[citation_id]) for citation_id in valid_ids]
@@ -151,11 +165,27 @@ def _has_matching_support(statement: str, evidence: dict[str, Any], quotes: list
     content = str(evidence.get("content", ""))
     normalized_content = " ".join(content.split()).casefold()
     exact_quotes = [" ".join(quote.split()) for quote in quotes if quote.strip()]
-    if not any(quote.casefold() in normalized_content for quote in exact_quotes):
+    # Every supplied quote must match, and word boundaries prevent "paid"
+    # from matching the substring in "unpaid". Fabricated quotes never vote
+    # in the lexical support calculation.
+    if not exact_quotes or not all(
+        re.search(r"(?<!\w)" + re.escape(quote.casefold()) + r"(?!\w)", normalized_content)
+        for quote in exact_quotes
+    ):
         return False
     evidence_terms = _support_tokens(" ".join(exact_quotes))
     claim_terms = _support_tokens(statement)
     return bool(claim_terms) and len(claim_terms & evidence_terms) / len(claim_terms) >= 0.35
+
+
+def _payment_statuses(value: str) -> set[str]:
+    normalized = " ".join(value.casefold().split())
+    # Remove explicit negations before recognizing affirmative "paid".
+    unpaid = re.compile(r"\bunpaid\b|\b(?:not|never)\s+(?:yet\s+|been\s+)?paid\b")
+    statuses = {"unpaid"} if unpaid.search(normalized) else set()
+    if re.search(r"\bpaid\b", unpaid.sub("", normalized)):
+        statuses.add("paid")
+    return statuses
 
 
 def citation_from_row(item: dict[str, Any]) -> dict[str, Any]:

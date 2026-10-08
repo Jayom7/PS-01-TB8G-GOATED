@@ -151,7 +151,11 @@ async def generate_claims(
     models = list(
         dict.fromkeys(
             model.removeprefix("models/")
-            for model in (settings.gemini_chat_model, settings.gemini_fallback_chat_model)
+            for model in (
+                settings.gemini_chat_model,
+                settings.gemini_fallback_chat_model,
+                *settings.gemini_additional_fallback_chat_models,
+            )
             if model
         )
     )
@@ -225,38 +229,42 @@ async def generate_claims(
             if model_index + 1 < len(models):
                 continue
             raise last_failure from exc
-        if response.status_code in {500, 502, 503, 504} and model_index + 1 < len(models):
+        if response.status_code in {429, 500, 502, 503, 504} and model_index + 1 < len(models):
             continue
-        break
-    if response is None:
-        raise last_failure or IntegrationFailure(
-            "Gemini generation failed", code="provider_unavailable"
-        )
-    if response.is_error:
-        code = (
-            "provider_rate_limited"
-            if response.status_code == 429
-            else "provider_timeout"
-            if response.status_code == 504
-            else "provider_unavailable"
-        )
-        raise IntegrationFailure(
-            f"Gemini generation is temporarily unavailable (HTTP {response.status_code})",
-            code=code,
-        )
-    try:
-        body = response.json()
-        candidates = body.get("candidates") if isinstance(body, dict) else None
-        model_text = candidates[0]["content"]["parts"][0]["text"]
-        output = json.loads(model_text)
-    except (IndexError, KeyError, TypeError, ValueError) as exc:
-        raise IntegrationFailure(
-            "Gemini returned malformed structured output", code="provider_invalid_response"
-        ) from exc
-    if not isinstance(output, dict):
-        raise IntegrationFailure(
-            "Gemini returned malformed structured output", code="provider_invalid_response"
-        )
-    output["_model"] = used_model
-    output["_fallback_used"] = fallback_used
-    return output
+        if response.is_error:
+            code = (
+                "provider_rate_limited"
+                if response.status_code == 429
+                else "provider_timeout"
+                if response.status_code == 504
+                else "provider_unavailable"
+            )
+            raise IntegrationFailure(
+                f"Gemini generation is temporarily unavailable (HTTP {response.status_code})",
+                code=code,
+            )
+        try:
+            body = response.json()
+            candidates = body.get("candidates") if isinstance(body, dict) else None
+            model_text = candidates[0]["content"]["parts"][0]["text"]
+            output = json.loads(model_text)
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            last_failure = IntegrationFailure(
+                "Gemini returned malformed structured output", code="provider_invalid_response"
+            )
+            if model_index + 1 < len(models):
+                continue
+            raise last_failure from exc
+        if not isinstance(output, dict):
+            last_failure = IntegrationFailure(
+                "Gemini returned malformed structured output", code="provider_invalid_response"
+            )
+            if model_index + 1 < len(models):
+                continue
+            raise last_failure
+        output["_model"] = used_model
+        output["_fallback_used"] = fallback_used
+        return output
+    if last_failure:
+        raise last_failure
+    raise IntegrationFailure("Gemini generation failed", code="provider_unavailable")

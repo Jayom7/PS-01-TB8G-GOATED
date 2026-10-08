@@ -73,3 +73,18 @@ seeded corpus:
 ```sh
 .venv/bin/python apps/api/scripts/evaluate_local_retrieval.py
 ```
+
+## Running-checkout security verification
+
+Run `.venv/bin/python apps/api/scripts/run_local_demo.py` from the repository
+root after starting the API/web. This checks all five local roles, forbidden
+citation/document lookup, forged contexts, CEO identity preservation, and
+honest Security labels. It requires the database documents to match the
+fictional repository fixtures before attempting real Gemini generation.
+`--skip-generation` leaves generation/source inspection and HR refusal blocked.
+Exit codes: 0 complete pass, 1 failed checks, 2 incomplete/blocked checks.
+Reports are saved only under ignored `data/local/`; no credentials are printed.
+
+Evaluation schema 2 reports hit rate@12 over positive queries and retrieved
+citation-location presence, not Recall@12 or semantic answer provenance.
+Legacy saved files are relabeled as historical on read without being rerun.

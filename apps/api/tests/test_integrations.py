@@ -121,7 +121,83 @@ async def test_generation_reports_provider_outage_after_trying_configured_fallba
 
 
 @pytest.mark.asyncio
-async def test_generation_does_not_spend_fallback_request_on_rate_limit() -> None:
+async def test_generation_uses_fallback_model_after_primary_rate_limit() -> None:
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = request.url.path.split("/")[-1].split(":")[0]
+        calls.append(model)
+        if model == "gemini-3.8-flash":
+            return httpx.Response(429)
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]},
+        )
+
+    config = settings()
+    config.gemini_fallback_chat_model = "gemini-3.7-flash"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        output = await generate_claims(client, config, "Generate an answer.")
+
+    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash"]
+    assert output["_model"] == "gemini-3.7-flash"
+    assert output["_fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_walks_configured_fallbacks_until_one_succeeds() -> None:
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = request.url.path.split("/")[-1].split(":")[0]
+        calls.append(model)
+        if model == "gemini-3.8-flash":
+            return httpx.Response(429)
+        if model == "gemini-3.7-flash":
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]},
+        )
+
+    config = settings()
+    config.gemini_additional_fallback_chat_models = [
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        output = await generate_claims(client, config, "Generate an answer.")
+
+    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
+    assert output["_model"] == "gemini-3.6-flash"
+    assert output["_fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_falls_back_after_malformed_structured_output() -> None:
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = request.url.path.split("/")[-1].split(":")[0]
+        calls.append(model)
+        text = "not JSON" if model == "gemini-3.8-flash" else '{"claims":[]}'
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": text}]}}]},
+        )
+
+    config = settings()
+    config.gemini_additional_fallback_chat_models = ["gemini-3.6-flash"]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        output = await generate_claims(client, config, "Generate an answer.")
+
+    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash"]
+    assert output["_model"] == "gemini-3.7-flash"
+    assert output["_fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_still_reports_rate_limit_when_all_models_are_limited() -> None:
     from ps01_api.integrations import IntegrationFailure
 
     calls: list[str] = []
@@ -132,9 +208,14 @@ async def test_generation_does_not_spend_fallback_request_on_rate_limit() -> Non
 
     config = settings()
     config.gemini_fallback_chat_model = "gemini-3.7-flash"
+    config.gemini_additional_fallback_chat_models = [
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+    ]
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(IntegrationFailure) as failure:
             await generate_claims(client, config, "Generate an answer.")
 
     assert failure.value.code == "provider_rate_limited"
-    assert len(calls) == 1
+    assert len(calls) == 5

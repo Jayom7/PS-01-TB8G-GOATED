@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import runpy
 from pathlib import Path
+
+import httpx
 
 ROOT = Path(__file__).resolve().parents[3]
 CORPUS = ROOT / "data" / "demo"
+SEED_SCRIPT = ROOT / "apps" / "api" / "scripts" / "seed_local_demo.py"
 
 
 def test_manifest_sources_are_real_unique_and_role_scoped() -> None:
@@ -23,30 +27,33 @@ def test_corpus_covers_required_pdf_image_and_record_domains() -> None:
     manifest = json.loads((CORPUS / "manifest.json").read_text())
     sources = manifest["sources"]
     paths = {source["path"] for source in sources}
+    counts = {
+        kind: sum(source["source_type"] == kind for source in sources)
+        for kind in ("pdf", "image_ocr", "structured")
+    }
     tables = {
         json.loads((CORPUS / source["path"]).read_text())["table"]
         for source in sources
         if source["source_type"] == "structured"
     }
 
+    assert counts == {"pdf": 2, "image_ocr": 2, "structured": 2}
     assert {
         "documents/contracts/acme-contract-ACM-MSA-2026-07.pdf",
-        "documents/finance/finance-policy-2026.pdf",
-        "documents/hr/employee-handbook-2026.pdf",
-        "documents/security/security-policy-2026.pdf",
-        "documents/product/atlas-gateway-specification.pdf",
-        "documents/procurement/northstar-supplier-agreement.pdf",
+        "documents/security/prompt-injection-test-01.pdf",
     } <= paths
     assert {
         "documents/finance/acme-invoice-ACM-INV-2048.png",
-        "documents/procurement/purchase-order-PO-8821.png",
-        "documents/finance/receipt-RCP-2048.png",
         "documents/hr/employee-acknowledgement-EMP-020.png",
     } <= paths
-    assert {"customers", "invoices", "payments", "employees", "projects", "orders"} <= tables
+    assert {"invoices", "projects"} == tables
+    assert all(
+        any(role in source["allowed_roles"] for source in sources)
+        for role in manifest["roles"]
+    )
 
 
-def test_acme_invoice_payment_and_contract_relationships_are_consistent() -> None:
+def test_acme_invoice_status_and_contract_relationships_are_consistent() -> None:
     manifest = json.loads((CORPUS / "manifest.json").read_text())
     structured = {
         json.loads((CORPUS / source["path"]).read_text())["table"]: json.loads(
@@ -56,11 +63,27 @@ def test_acme_invoice_payment_and_contract_relationships_are_consistent() -> Non
         if source["source_type"] == "structured"
     }
 
-    customer = structured["customers"][0]
     invoice = structured["invoices"][0]
-    payment = structured["payments"][0]
-    assert customer["customer_id"] == invoice["customer_id"] == payment["customer_id"]
-    assert customer["contract_id"] == invoice["contract_id"] == "ACM-MSA-2026-07"
-    assert payment["invoice_id"] == invoice["invoice_id"] == "ACM-INV-2048"
+    assert invoice["contract_id"] == "ACM-MSA-2026-07"
     assert invoice["due_date"] < "2026-10-08" and invoice["payment_status"] == "unpaid"
-    assert payment["status"] == "declined" and payment["settled_minor_units"] == 0
+
+
+def test_seed_prunes_only_removed_documents_with_local_demo_markers() -> None:
+    prune = runpy.run_path(str(SEED_SCRIPT))["prune_removed_demo_sources"]
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"id": "retained"}, {"id": "stale-demo"}])
+        return httpx.Response(204)
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        removed = prune(client, "http://local.test", "local-key", "org-id", {"retained"})
+
+    assert removed == 1
+    assert requests[0].url.params.get("organization_id") == "eq.org-id"
+    assert requests[0].url.params.get("metadata->>synthetic") == "eq.true"
+    assert requests[0].url.params.get("metadata->>local_demo_path") == "not.is.null"
+    assert len(requests) == 2
+    assert requests[1].url.params.get("id") == "eq.stale-demo"

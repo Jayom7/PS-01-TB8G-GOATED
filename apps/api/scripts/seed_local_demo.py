@@ -84,9 +84,7 @@ def request_rows(
     *,
     params: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
-    response = client.get(
-        f"{base_url}/rest/v1/{table}", headers=rest_headers(key), params=params
-    )
+    response = client.get(f"{base_url}/rest/v1/{table}", headers=rest_headers(key), params=params)
     response.raise_for_status()
     body = response.json()
     if not isinstance(body, list) or any(not isinstance(row, dict) for row in body):
@@ -109,15 +107,44 @@ def write_rows(
     else:
         headers["Prefer"] = "return=representation"
     params = {"on_conflict": on_conflict} if on_conflict else None
-    response = client.post(
-        f"{base_url}/rest/v1/{table}", headers=headers, params=params, json=rows
-    )
+    response = client.post(f"{base_url}/rest/v1/{table}", headers=headers, params=params, json=rows)
     if response.is_error:
         raise RuntimeError(f"Local Supabase rejected writes to {table} ({response.status_code}).")
     body = response.json()
     if not isinstance(body, list) or any(not isinstance(row, dict) for row in body):
         raise RuntimeError(f"Local Supabase returned invalid write results for {table}.")
     return body
+
+
+def prune_removed_demo_sources(
+    client: httpx.Client,
+    base_url: str,
+    service_key: str,
+    org_id: str,
+    retained_document_ids: set[str],
+) -> int:
+    """Delete only superseded, explicitly tagged local demo documents in this org."""
+    rows = request_rows(
+        client,
+        base_url,
+        service_key,
+        "documents",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "metadata->>synthetic": "eq.true",
+            "metadata->>local_demo_path": "not.is.null",
+            "select": "id",
+        },
+    )
+    stale_ids = [str(row["id"]) for row in rows if str(row["id"]) not in retained_document_ids]
+    for document_id in stale_ids:
+        response = client.delete(
+            f"{base_url}/rest/v1/documents",
+            headers=rest_headers(service_key),
+            params={"id": f"eq.{document_id}"},
+        )
+        response.raise_for_status()
+    return len(stale_ids)
 
 
 def seed_users(
@@ -475,9 +502,13 @@ async def main() -> None:
         if missing_grants:
             write_rows(client, base_url, service_key, "access_grants", missing_grants)
 
+        removed_sources = prune_removed_demo_sources(
+            client, base_url, service_key, org_id, set(source_documents.values())
+        )
+
     print(
         f"Seeded {len(users)} local demo identities, {len(source_documents)} sources, "
-        f"and refreshed {len(chunk_rows)} chunks."
+        f"refreshed {len(chunk_rows)} chunks, and pruned {removed_sources} superseded demo sources."
     )
     print(f"Local-only credentials saved to {CREDENTIALS.name} (mode 600; git-ignored).")
 

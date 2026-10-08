@@ -30,6 +30,8 @@ type QueryResult = {
     timing_ms: Record<string, number | null>;
     ranking_timing_note: string;
     history_saved?: boolean;
+    history_replay?: boolean;
+    canonical_evidence_count?: number;
   };
 };
 type SourcePreview = {
@@ -747,12 +749,12 @@ export default function Workspace({ identity, view }: { identity: string; view: 
         <div className="drawer-policy"><Icon name="lock" size={16} /><div><strong>Why this source is available</strong><p>Your current access includes this source. The database checks access again when you open its original.</p></div></div>
       </Drawer>}
       {traceOpen && result && <Drawer title="Retrieval trace" description="Operational steps for this answer" onClose={() => setTraceOpen(false)}>
-        <div className="trace-boundary"><Icon name="lock" size={18} /><strong>Authorized evidence only</strong><p>Retrieval uses a verified user session. Only returned passages enter model context.</p></div>
+        <div className="trace-boundary"><Icon name="lock" size={18} /><strong>Authorized evidence only</strong><p>{result.trace.history_replay ? "This saved answer was rebuilt from sources available in your current context. Generation and original timings were not rerun." : "Retrieval uses a verified user session. Only returned passages enter model context."}</p></div>
         <ol className="operational-trace">{[
           ["Question", askedQuery], ["Identity", userName], ["Authorization", role],
           ["Retrieval", "Database policies applied before results are returned"],
-          ["Evidence", `${result.trace.evidence_items_sent_to_model} canonical passages in context`],
-          ["Generation", result.trace.generation_model ?? "Not required"],
+          ["Evidence", result.trace.history_replay ? `${result.trace.canonical_evidence_count ?? 0} current authorized passages checked` : `${result.trace.evidence_items_sent_to_model} canonical passages in context`],
+          ["Generation", result.trace.history_replay ? "Not rerun" : result.trace.generation_model ?? "Not required"],
           ["Citation validation", "Evidence IDs resolved to canonical source excerpts"],
         ].map(([label, value]) => <li key={label}><strong>{label}</strong><span>{value}</span></li>)}</ol>
         <dl className="source-facts">{Object.entries(result.trace.timing_ms).map(([key, value]) => <div key={key}><dt>{timingLabel(key)}</dt><dd>{typeof value === "number" ? `${Math.round(value)} ms` : "Not measured"}</dd></div>)}</dl>

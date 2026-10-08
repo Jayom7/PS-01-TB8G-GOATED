@@ -235,7 +235,18 @@ def test_reopen_client_written_answer_cannot_bypass_canonical_rebuild(citations)
     rows.assert_not_awaited()
 
 
-@pytest.mark.parametrize("saved", [None, {"claims": [None]}, {"claims": "invalid", "trace": None}])
+@pytest.mark.parametrize(
+    "saved",
+    [
+        None,
+        {"claims": [None]},
+        {"claims": "invalid", "trace": None},
+        {
+            "claims": [{"citations": [{"citation_id": {}, "evidence_id": "invalid"}]}],
+            "trace": {"generation_model": "fabricated", "timing_ms": {"total_ms": 1}},
+        },
+    ],
+)
 def test_malformed_history_content_fails_closed_without_crashing(saved):
     with (
         patch("ps01_api.main._identity", AsyncMock(return_value=IDENTITY)),
@@ -247,3 +258,7 @@ def test_malformed_history_content_fails_closed_without_crashing(saved):
         response = TestClient(app).get(f"/api/v1/conversations/{ID}", headers=HEADERS)
     assert response.status_code == 200
     assert response.json()["turns"][0]["response"]["claims"] == []
+    trace = response.json()["turns"][0]["response"]["trace"]
+    assert trace["history_replay"] is True
+    assert trace["generation_model"] is None
+    assert trace["timing_ms"] == {}

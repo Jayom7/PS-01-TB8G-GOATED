@@ -1419,7 +1419,9 @@ async def conversation(
                 if isinstance(c, dict)
             ]
             ids = list(
-                dict.fromkeys(c.get("citation_id") for c in citations if c.get("citation_id"))
+                dict.fromkeys(
+                    c["citation_id"] for c in citations if isinstance(c.get("citation_id"), str)
+                )
             )
             try:
                 ids = [str(UUID(value)) for value in ids if isinstance(value, str)][:100]
@@ -1451,19 +1453,20 @@ async def conversation(
                 "request_id": row.get("id", str(uuid4())),
                 "conversation_id": str(conversation_id),
                 "trace": {
-                    key: value
-                    for key, value in (
-                        saved.get("trace") if isinstance(saved.get("trace"), dict) else {}
-                    ).items()
-                    if key
-                    in {
-                        "timing_ms",
-                        "generation_model",
-                        "evidence_items_sent_to_model",
-                        "history_saved",
-                        "active_role",
-                        "fallback_used",
-                    }
+                    "session_verified": True,
+                    "database_request_used_user_session": True,
+                    "active_role": role,
+                    "history_replay": True,
+                    "canonical_evidence_count": len(canonical),
+                    "evidence_items_sent_to_model": 0,
+                    "generation_model": None,
+                    "fallback_used": False,
+                    "history_saved": True,
+                    "timing_ms": {},
+                    "ranking_timing_note": (
+                        "History replay rechecks current source access; generation and "
+                        "original timings were not rerun."
+                    ),
                 },
                 **rebuilt,
             }

@@ -72,6 +72,26 @@ class SecureRagTests(unittest.TestCase):
             {"table": "invoices", "row": "INV-2048"},
         )
 
+    def test_structured_citation_uses_table_metadata_not_document_id(self) -> None:
+        row = {
+            **self.finance_row,
+            "source_id": "nova-finance-records",
+            "metadata": {"table": "invoices"},
+        }
+        result = validate_generation(
+            {
+                "claims": [
+                    {"text": "The invoice is unpaid.", "citation_ids": [row["chunk_id"]]}
+                ]
+            },
+            [row],
+        )
+
+        self.assertEqual(
+            result["claims"][0]["citations"][0]["location"],
+            {"table": "invoices", "row": "INV-2048"},
+        )
+
     def test_claim_without_exact_source_location_is_removed(self) -> None:
         row_without_location = {**self.finance_row, "row_id": None}
         result = validate_generation(

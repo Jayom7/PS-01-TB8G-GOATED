@@ -1,0 +1,12 @@
+{
+  "table": "employees",
+  "records": [
+    {
+      "employee_id": "NVC-HR-020",
+      "role": "People Operations Manager",
+      "annual_salary_minor_units": 14500000,
+      "currency": "USD",
+      "employment_status": "active"
+    }
+  ]
+}

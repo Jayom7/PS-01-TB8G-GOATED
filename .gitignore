@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !apps/web/.env.local.example
+.local-demo-credentials.json
 .venv/
 venv/
 __pycache__/

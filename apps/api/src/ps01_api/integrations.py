@@ -41,6 +41,26 @@ async def verify_supabase_session(
 async def create_embedding(
     client: httpx.AsyncClient, settings: Settings, text: str
 ) -> list[float]:
+    return await _create_embedding(
+        client,
+        settings,
+        f"task: search result | query: {text}",
+    )
+
+
+async def create_document_embedding(
+    client: httpx.AsyncClient, settings: Settings, title: str, text: str
+) -> list[float]:
+    return await _create_embedding(
+        client,
+        settings,
+        f"title: {title or 'none'} | text: {text}",
+    )
+
+
+async def _create_embedding(
+    client: httpx.AsyncClient, settings: Settings, input_text: str
+) -> list[float]:
     if not settings.gemini_api_key:
         raise IntegrationFailure("Gemini is not configured")
     if settings.embedding_dimensions != 1536:
@@ -54,10 +74,7 @@ async def create_embedding(
             "content": {
                 "parts": [
                     {
-                        "text": (
-                            "task: Given a user question, retrieve relevant evidence that answers it.\n"
-                            f"question: {text}"
-                        )
+                        "text": input_text
                     }
                 ]
             },

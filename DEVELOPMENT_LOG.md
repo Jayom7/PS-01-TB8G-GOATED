@@ -75,14 +75,9 @@
 
 ## Open setup items
 
-- Install GitHub CLI and authenticate with `gh auth login` before creating the
-  private GitHub repository and pushing.
-- Install Docker Desktop (or another Docker-compatible runtime) and the
-  Supabase CLI before local migration validation.
-- Local Gemini and Supabase credentials are populated and the public Supabase
-  values match across the root and web config. A read-only live check could
-  not resolve either provider hostname (`ENOTFOUND`); do not treat this as
-  credential acceptance or rejection.
+- Authenticate the Supabase CLI and link the existing hosted project before
+  applying the migration there. The local project migration and 17 pgTAP tests
+  pass; the hosted schema remains unverified.
 
 ## 2026-10-08 — Authenticated query slice
 
@@ -111,3 +106,36 @@
   Supabase and Gemini provider checks also failed DNS resolution. Docker,
   Supabase CLI, and `gh` are missing. No migration, live auth, provider call,
   database allow/deny test, ingestion flow, or GitHub setup was verified.
+
+## 2026-10-08 — Local secure retrieval and ingestion verification
+
+- Verified GitHub SSH access with `git ls-remote`; Docker Desktop and the local
+  Supabase stack are running. Supabase CLI is available locally, but its hosted
+  project access token is not configured.
+- Applied the existing migration to local Supabase. All 17 pgTAP tests passed,
+  covering RLS/grants, authenticated RPC access, finance allow, HR denial,
+  source visibility, and cross-organization isolation. `supabase db lint
+  --local` reported no schema errors.
+- Installed API development and optional ingestion dependencies in ignored
+  `.venv`. Twenty-four API/RAG/ingestion tests passed. The API started locally
+  and `/health` returned `{"status":"ok"}`. Ruff and Python compilation passed.
+- Verified Supabase Auth settings requests and Gemini model resource requests.
+  A real Gemini embedding returned 1536 dimensions, and structured generation
+  succeeded. No key or embedding data was printed or persisted.
+- Implemented bounded PDF extraction, scanned-page and image OCR, and
+  structured-record normalization with source provenance. PaddleOCR was run
+  on the synthetic invoice scan and detected its amount with page/region
+  metadata. Added fictional, reproducible demo documents and records.
+- Hosted Supabase migration remains blocked by missing CLI authentication or
+  database credentials. No hosted data/users were modified or created.
+- Seeded five local demo accounts, role grants, eight synthetic source
+  documents, 16 extracted chunks, and 1536-dimensional Gemini embeddings.
+  Stored local-only passwords in ignored `.local-demo-credentials.json` and
+  configured the ignored web env file to use local Supabase/FastAPI.
+- Retrieval evaluation on the five-case synthetic set measured Recall@12 1.0,
+  MRR 0.775, and zero forbidden-source hits. This is a small smoke set, not a
+  representative benchmark.
+- The full generation demo reached a successful invoice query during one
+  attempt, but subsequent requests received Gemini HTTP 503 `UNAVAILABLE`
+  (“high demand”). The multi-query answer/citation demo remains incomplete
+  until that provider endpoint recovers.

@@ -21,10 +21,17 @@ requester's identity attached to retrieval.
 - The frontend shows real session state, query states, source details, and
   honest setup states for areas that are not connected yet.
 
-The retrieval migration is still a draft. It has not been applied or tested
-against the connected Supabase project, and provider requests have not yet
-been verified from this environment. Do not describe RLS enforcement or the
-full demo flow as validated until the database allow/deny tests pass.
+The migration has been applied to the local Supabase stack. Its 17 database
+allow/deny tests and the local schema linter pass. The hosted project has not
+been migrated because the Supabase CLI is not authenticated. Gemini embedding
+and generation requests and Supabase Auth settings requests have succeeded
+with the configured credentials. These checks do not validate the hosted
+database or the full demo flow.
+
+PDF text extraction, bounded OCR for scanned PDFs and images, and structured
+record normalization are implemented as ingestion primitives. They are not
+yet connected to an authenticated upload route or database persistence path.
+Synthetic demo fixtures are in `data/demo/`.
 
 ## Local setup
 
@@ -47,6 +54,8 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 uvicorn --app-dir src ps01_api.main:app --reload
 ```
+
+Install optional PDF/OCR dependencies with `pip install -e '.[dev,ingestion]'`.
 
 See [API setup](apps/api/README.md), [implementation plan](docs/IMPLEMENTATION_PLAN.md),
 and [review items](docs/REVIEW_NEEDED.md) for the current proof boundaries.

@@ -1,0 +1,16 @@
+{
+  "table": "invoices",
+  "records": [
+    {
+      "invoice_id": "ACM-INV-2048",
+      "customer": "Acme Manufacturing",
+      "currency": "USD",
+      "total_minor_units": 4800000,
+      "invoice_date": "2026-09-01",
+      "due_date": "2026-10-01",
+      "payment_status": "unpaid",
+      "status_as_of": "2026-10-08",
+      "contract_id": "ACM-MSA-2026-07"
+    }
+  ]
+}

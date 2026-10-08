@@ -1,0 +1,12 @@
+{
+  "table": "opportunities",
+  "records": [
+    {
+      "opportunity_id": "NVC-SALES-047",
+      "customer": "Acme Manufacturing",
+      "stage": "contracted",
+      "annual_value_minor_units": 19200000,
+      "contract_id": "ACM-MSA-2026-07"
+    }
+  ]
+}

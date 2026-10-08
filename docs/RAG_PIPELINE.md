@@ -2,14 +2,15 @@
 
 ## Ingestion
 
-1. Authenticate the ingestion actor and validate source type, size, and media
-   type. Compute checksum and retain original bytes in private object storage.
-2. PDF adapter extracts page text with PyMuPDF; scanned pages may pass through
-   the OCR adapter. Image adapter runs local OCR and preserves page/image ID,
-   bounding boxes, confidence where available, and original asset reference.
-3. Structured adapter reads allowlisted demo tables and preserves table name,
-   stable row key, typed fields, and row ACL metadata. Render a deterministic
-   searchable text form; never replace typed provenance with prose alone.
+1. **Implemented primitive:** PDF and image parsers validate file signatures
+   and size. PDF text extraction records page provenance; blank scanned pages
+   and images can use local PaddleOCR with bounded rendering and region
+   provenance. Structured records serialize deterministically and retain table
+   and row provenance. OCR/PDF and structured-record unit tests pass; PaddleOCR
+   was also run on the synthetic invoice scan.
+2. **Still required for a complete ingestion flow:** authenticate the actor,
+   compute checksums, retain originals in private object storage, enforce
+   source ACLs, schedule ingestion, and persist chunks/vectors transactionally.
 4. Normalize outputs to `KnowledgeUnit(content, source_type, source_id,
    organization_id, classification, provenance, metadata, access_policy)`.
 5. Chunk with source-aware boundaries and stable source locations. Validate
@@ -35,9 +36,10 @@
 
 HNSW is the initial approximate index candidate. Selective filters can reduce
    returned neighbors; validate pgvector iterative scans and exact-search
-   fallback against the installed extension version and representative
-   authorization selectivity. Keep this as an open review item until SQL,
-   `EXPLAIN`, recall, and deny tests exist.
+fallback against the installed extension version and representative
+authorization selectivity. The migration has been applied to local Supabase;
+its 17 pgTAP authorization/schema checks pass and local DB lint reports no
+errors. The hosted project has not been migrated or verified.
 
 ## Grounded generation
 
@@ -57,6 +59,9 @@ proof that it did not do so.
 
 - `EmbeddingProvider.embed(texts, task)` returns one finite vector per input,
   with configured dimensions and model identity.
+- Gemini Embedding 2 query inputs use the `task: search result | query:` form;
+  corpus text uses `title: ... | text: ...`. Keep these paired formats
+  consistent when indexing and querying.
 - `Generator.generate(question, authorized_evidence, schema)` returns typed
   candidate claims and references. It cannot retrieve or call tools.
 - Model IDs, dimensions, limits, and timeouts come from configuration. Provider
@@ -68,5 +73,8 @@ proof that it did not do so.
 Track retrieval relevance/recall on a versioned synthetic set, source-type
 coverage, cross-modal hit rate, citation validity, grounded-answer rate,
 authorized context violations (must be zero in tests), latency, and query
-plans. Publish only results produced by executable evaluation runs, with set
-version and configuration. No benchmark results exist yet.
+plans. `apps/api/scripts/evaluate_local_retrieval.py` executes five query cases
+against the local seeded corpus and reports Recall@12, MRR, latency, and
+forbidden-source hits. The current run measured Recall@12 1.0, MRR 0.775, and
+zero authorization violations on this small synthetic set. Treat it as a
+smoke evaluation, not a representative benchmark.

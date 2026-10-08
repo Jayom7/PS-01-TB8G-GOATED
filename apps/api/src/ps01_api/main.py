@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID, uuid4
 
 import httpx
@@ -112,7 +113,7 @@ async def query_knowledge(
 
 @app.get("/api/v1/sources/{source_id}", tags=["sources"])
 async def get_source(
-    source_id: UUID = Path(),
+    source_id: Annotated[UUID, Path()],
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     settings = get_settings()

@@ -69,7 +69,11 @@ def validate_generation(
             continue
         statement = raw.get("text")
         references = raw.get("citation_ids")
-        if not isinstance(statement, str) or not statement.strip() or not isinstance(references, list):
+        if (
+            not isinstance(statement, str)
+            or not statement.strip()
+            or not isinstance(references, list)
+        ):
             rejected = True
             continue
         valid_ids = list(dict.fromkeys(str(value) for value in references if str(value) in by_id))
@@ -102,7 +106,9 @@ def citation_from_row(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item.get("ocr_region"), dict):
             location["region"] = item["ocr_region"]
     elif source_type == "structured" and item.get("row_id"):
-        location = {"table": item.get("source_id"), "row": item["row_id"]}
+        metadata = item.get("metadata")
+        table = metadata.get("table") if isinstance(metadata, dict) else None
+        location = {"table": table or item.get("source_id"), "row": item["row_id"]}
 
     return {
         "citation_id": str(item.get("chunk_id", "")),

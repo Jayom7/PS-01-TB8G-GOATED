@@ -1,0 +1,12 @@
+{
+  "table": "projects",
+  "records": [
+    {
+      "project_id": "NVC-ENG-ATLAS",
+      "name": "Atlas Data Gateway",
+      "release": "2026.10",
+      "status": "staging validation",
+      "owner_team": "Platform Engineering"
+    }
+  ]
+}

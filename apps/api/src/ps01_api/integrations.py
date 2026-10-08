@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 from typing import Any
@@ -18,6 +17,7 @@ class IntegrationFailure(Exception):
     def __init__(self, message: str, *, code: str = "upstream_unavailable") -> None:
         super().__init__(message)
         self.code = code
+        self.timing_ms: dict[str, float | None] | None = None
 
 
 async def verify_supabase_session(
@@ -127,13 +127,19 @@ async def retrieve_chunks(
         },
     )
     if response.is_error:
-        raise IntegrationFailure("Authorized retrieval is unavailable")
+        raise IntegrationFailure(
+            "Authorized retrieval is unavailable", code="retrieval_unavailable"
+        )
     try:
         rows = response.json()
     except ValueError as exc:
-        raise IntegrationFailure("Supabase returned invalid retrieval data") from exc
+        raise IntegrationFailure(
+            "Supabase returned invalid retrieval data", code="retrieval_unavailable"
+        ) from exc
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise IntegrationFailure("Supabase returned an invalid retrieval response")
+        raise IntegrationFailure(
+            "Supabase returned an invalid retrieval response", code="retrieval_unavailable"
+        )
     return rows
 
 
@@ -183,48 +189,43 @@ async def generate_claims(
     response = None
     used_model = models[0]
     fallback_used = False
+    last_failure: IntegrationFailure | None = None
     for model_index, model in enumerate(models):
         used_model = model
-        if model_index > 0:
-            fallback_used = True
-        for attempt in range(2):
-            try:
-                response = await client.post(
-                    f"{GEMINI_API_ROOT}/models/{model}:generateContent",
-                    headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
-                    json=payload,
-                    timeout=httpx.Timeout(15.0, connect=5.0),
-                )
-            except httpx.TimeoutException as exc:
-                response = None
-                if model_index < len(models) - 1:
-                    break
-                raise IntegrationFailure(
-                    "Gemini generation timed out", code="provider_timeout"
-                ) from exc
-            except httpx.TransportError as exc:
-                response = None
-                if model_index < len(models) - 1:
-                    break
-                raise IntegrationFailure(
-                    "Gemini could not be reached", code="provider_unavailable"
-                ) from exc
-            transient_failure = response.status_code in {429, 500, 502, 503, 504}
-            if not transient_failure or attempt == 1:
-                break
-            await asyncio.sleep(0.35)
-        if response is None:
+        fallback_used = model_index > 0
+        try:
+            response = await client.post(
+                f"{GEMINI_API_ROOT}/models/{model}:generateContent",
+                headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
+                json=payload,
+                timeout=httpx.Timeout(15.0, connect=5.0),
+            )
+        except httpx.TimeoutException as exc:
+            last_failure = IntegrationFailure(
+                "Gemini generation timed out", code="provider_timeout"
+            )
+            if model_index + 1 < len(models):
+                continue
+            raise last_failure from exc
+        except httpx.TransportError as exc:
+            last_failure = IntegrationFailure(
+                "Gemini could not be reached", code="provider_unavailable"
+            )
+            if model_index + 1 < len(models):
+                continue
+            raise last_failure from exc
+        if response.status_code in {429, 500, 502, 503, 504} and model_index + 1 < len(models):
             continue
-        if not response.is_error or response.status_code not in {429, 500, 502, 503, 504}:
-            break
-        if model_index < len(models) - 1:
-            continue
+        break
     if response is None:
-        raise IntegrationFailure("Gemini generation timed out", code="provider_timeout")
+        raise last_failure or IntegrationFailure(
+            "Gemini generation failed", code="provider_unavailable"
+        )
     if response.is_error:
+        code = "provider_timeout" if response.status_code == 504 else "provider_unavailable"
         raise IntegrationFailure(
             f"Gemini generation is temporarily unavailable (HTTP {response.status_code})",
-            code="provider_unavailable",
+            code=code,
         )
     try:
         body = response.json()

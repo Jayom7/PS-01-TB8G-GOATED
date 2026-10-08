@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import runpy
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -53,7 +54,13 @@ app.add_middleware(
     allow_origins=[get_settings().web_origin],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type", "X-Source-Name", "X-Access-Role"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Source-Name",
+        "X-Access-Role",
+        "X-Demo-Role",
+    ],
 )
 
 
@@ -66,16 +73,17 @@ async def integration_failure_handler(_request: Request, exc: IntegrationFailure
         "provider_invalid_response": (
             "The answer service returned an unusable response. Please retry."
         ),
+        "retrieval_unavailable": "Authorized search is unavailable. No answer was generated.",
     }
-    return JSONResponse(
-        status_code=503,
-        content={
-            "detail": messages.get(
-                exc.code, "A workspace service is temporarily unavailable. Please retry."
-            ),
-            "code": exc.code,
-        },
-    )
+    content: dict[str, object] = {
+        "detail": messages.get(
+            exc.code, "A workspace service is temporarily unavailable. Please retry."
+        ),
+        "code": exc.code,
+    }
+    if exc.timing_ms is not None:
+        content["timing_ms"] = exc.timing_ms
+    return JSONResponse(status_code=503, content=content)
 
 
 @app.exception_handler(httpx.HTTPError)
@@ -150,23 +158,25 @@ async def _identity(client: httpx.AsyncClient, settings, token: str) -> dict[str
     if not user:
         raise HTTPException(status_code=401, detail="Invalid session")
     user_id = str(user["id"])
-    profile_response = await _rest_rows(
-        client,
-        settings,
-        token,
-        "profiles",
-        params={
-            "user_id": f"eq.{user_id}",
-            "select": "user_id,organization_id,display_name",
-            "limit": "1",
-        },
-    )
-    role_response = await _rest_rows(
-        client,
-        settings,
-        token,
-        "user_roles",
-        params={"user_id": f"eq.{user_id}", "select": "role_id,organization_id"},
+    profile_response, role_response = await asyncio.gather(
+        _rest_rows(
+            client,
+            settings,
+            token,
+            "profiles",
+            params={
+                "user_id": f"eq.{user_id}",
+                "select": "user_id,organization_id,display_name",
+                "limit": "1",
+            },
+        ),
+        _rest_rows(
+            client,
+            settings,
+            token,
+            "user_roles",
+            params={"user_id": f"eq.{user_id}", "select": "role_id,organization_id"},
+        ),
     )
     profiles = profile_response.json()
     assignments = role_response.json()
@@ -220,6 +230,62 @@ def _activity_for(user_id: str) -> list[dict[str, object]]:
     return [entry for entry in reversed(activity) if entry.get("user_id") == user_id][:20]
 
 
+async def _context_token(
+    client: httpx.AsyncClient,
+    settings,
+    actor_token: str,
+    identity: dict[str, object],
+    requested_role: str | None,
+) -> tuple[str, str]:
+    """Resolve a server-authorized demo context to a role-scoped Supabase session."""
+    role = requested_role or str(identity["role"])
+    assigned_roles = identity.get("roles", [])
+    if role == identity["role"]:
+        return actor_token, role
+    if role not in DEMO_ROLES or not isinstance(assigned_roles, list):
+        raise HTTPException(
+            status_code=403, detail="This demo role is not available to your identity"
+        )
+    if role not in assigned_roles and not (
+        _local_demo_enabled() and identity["role"] == "CEO" and role in DEMO_ROLES
+    ):
+        raise HTTPException(
+            status_code=403, detail="This demo role is not available to your identity"
+        )
+    if not _local_demo_enabled():
+        raise HTTPException(status_code=403, detail="Demo role contexts are available only locally")
+
+    cache = getattr(app.state, "demo_role_sessions", {})
+    cached = cache.get(role)
+    if cached and cached["expires_at"] > time.monotonic() + 60:
+        return str(cached["access_token"]), role
+    try:
+        credentials = json.loads(DEMO_CREDENTIALS.read_text())
+        target = credentials.get(role)
+    except (OSError, ValueError):
+        target = None
+    if not isinstance(target, dict) or not target.get("email") or not target.get("password"):
+        raise HTTPException(status_code=503, detail="Local demo role credentials are unavailable")
+    response = await client.post(
+        f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
+        params={"grant_type": "password"},
+        headers={"apikey": settings.supabase_publishable_key.get_secret_value()},
+        json={"email": target["email"], "password": target["password"]},
+    )
+    if response.is_error:
+        raise HTTPException(status_code=503, detail="Local demo role session is unavailable")
+    session = response.json()
+    access_token = session.get("access_token")
+    if not isinstance(access_token, str):
+        raise HTTPException(status_code=503, detail="Local demo role session is invalid")
+    cache[role] = {
+        "access_token": access_token,
+        "expires_at": time.monotonic() + int(session.get("expires_in", 3600)),
+    }
+    app.state.demo_role_sessions = cache
+    return access_token, role
+
+
 def bearer_token(authorization: str | None) -> str:
     scheme, _, token = (authorization or "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
@@ -247,49 +313,55 @@ async def health() -> dict[str, str]:
 @app.get("/api/v1/workspace", tags=["workspace"])
 async def workspace_summary(
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
     token = bearer_token(authorization)
     timeout = httpx.Timeout(12.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         identity = await _identity(client, settings, token)
+        context_token, active_role = await _context_token(
+            client, settings, token, identity, demo_role
+        )
         organization_id = str(identity["organization_id"])
-        docs_response = await _rest_rows(
-            client,
-            settings,
-            token,
-            "documents",
-            params={
-                "organization_id": f"eq.{organization_id}",
-                "select": "id,source_name,source_type,created_at,metadata",
-                "order": "created_at.desc",
-                "limit": "500",
-            },
-            headers={"Prefer": "count=exact", "Range": "0-499"},
-        )
-        chunks_response = await _rest_rows(
-            client,
-            settings,
-            token,
-            "knowledge_chunks",
-            params={
-                "organization_id": f"eq.{organization_id}",
-                "select": "id,row_id",
-                "limit": "1",
-            },
-            headers={"Prefer": "count=exact", "Range": "0-0"},
-        )
-        structured_response = await _rest_rows(
-            client,
-            settings,
-            token,
-            "knowledge_chunks",
-            params={
-                "organization_id": f"eq.{organization_id}",
-                "source_type": "eq.structured",
-                "select": "row_id",
-                "limit": "5000",
-            },
+        docs_response, chunks_response, structured_response = await asyncio.gather(
+            _rest_rows(
+                client,
+                settings,
+                context_token,
+                "documents",
+                params={
+                    "organization_id": f"eq.{organization_id}",
+                    "select": "id,source_name,source_type,created_at,metadata",
+                    "order": "created_at.desc",
+                    "limit": "500",
+                },
+                headers={"Prefer": "count=exact", "Range": "0-499"},
+            ),
+            _rest_rows(
+                client,
+                settings,
+                context_token,
+                "knowledge_chunks",
+                params={
+                    "organization_id": f"eq.{organization_id}",
+                    "select": "id,row_id",
+                    "limit": "1",
+                },
+                headers={"Prefer": "count=exact", "Range": "0-0"},
+            ),
+            _rest_rows(
+                client,
+                settings,
+                context_token,
+                "knowledge_chunks",
+                params={
+                    "organization_id": f"eq.{organization_id}",
+                    "source_type": "eq.structured",
+                    "select": "row_id",
+                    "limit": "5000",
+                },
+            ),
         )
         documents = docs_response.json()
         if not isinstance(documents, list):
@@ -297,8 +369,20 @@ async def workspace_summary(
         content_range = chunks_response.headers.get("content-range", "*/0").rsplit("/", 1)[-1]
         chunk_count = int(content_range) if content_range.isdigit() else 0
     recent = _activity_for(str(identity["user_id"]))
+    latest_evaluation_status = "not run"
+    if EVALUATION_RESULTS.is_file():
+        try:
+            saved_evaluation = json.loads(EVALUATION_RESULTS.read_text())
+            latest_evaluation_status = (
+                "passed"
+                if saved_evaluation.get("authorization_violations") == 0
+                else "review"
+            )
+        except (OSError, ValueError, AttributeError):
+            latest_evaluation_status = "unavailable"
     return {
         "identity": identity,
+        "active_role": active_role,
         "document_count": len(documents),
         "chunk_count": chunk_count,
         "structured_record_count": len(
@@ -325,23 +409,27 @@ async def workspace_summary(
         if _local_demo_enabled() and settings.supabase_secret_key
         else "local admin key unavailable",
         "evaluation": "available" if _local_demo_enabled() else "local demo unavailable",
-        "demo_switch_available": _local_demo_enabled(),
+        "latest_evaluation_status": latest_evaluation_status,
+        "demo_switch_available": _local_demo_enabled() and identity["role"] == "CEO",
     }
 
 
 @app.get("/api/v1/security", tags=["security"])
 async def security_status(
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
     token = bearer_token(authorization)
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         identity = await _identity(client, settings, token)
+        _, active_role = await _context_token(client, settings, token, identity, demo_role)
     trace = [
         {
             "created_at": item.get("created_at"),
             "query_id": item.get("request_id"),
             "state": item.get("state"),
+            "active_role": item.get("active_role", "unknown"),
             "authorized_evidence_count": item.get("evidence_count", 0),
             "unauthorized_evidence_count": 0,
             "decision": "authorized retrieval"
@@ -352,15 +440,18 @@ async def security_status(
     ]
     return {
         "identity": identity,
-        "effective_scope": "organization records granted to this user's assigned role",
+        "active_role": active_role,
+        "effective_scope": f"{active_role} demo context: organization records granted to that role",
         "trace": trace,
         "security_tests": {
             "user_session_required": "enforced",
-            "database_row_level_security": "active",
+            "database_row_level_security": "active (local migration)"
+            if _local_demo_enabled()
+            else "configured; hosted state unverified",
             "unauthorized_evidence_to_model": 0,
             "basis": (
-                "The retrieval RPC runs with the user's bearer session and the model receives "
-                "only returned rows."
+                "Retrieval uses a server-authorized role session; the model receives only rows "
+                "returned under that session's RLS policies."
             ),
         },
     }
@@ -369,8 +460,9 @@ async def security_status(
 @app.get("/api/v1/sources", tags=["sources"])
 async def list_sources(
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
-    summary = await workspace_summary(authorization)
+    summary = await workspace_summary(authorization, demo_role)
     return {
         "identity": summary["identity"],
         "sources": summary["documents"],
@@ -381,11 +473,13 @@ async def list_sources(
 @app.get("/api/v1/evaluation", tags=["evaluation"])
 async def get_evaluation(
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
         token = await require_session(client, authorization)
-        await _identity(client, settings, token)
+        identity = await _identity(client, settings, token)
+        await _context_token(client, settings, token, identity, demo_role)
     if EVALUATION_RESULTS.is_file():
         try:
             return {"state": "completed", "result": json.loads(EVALUATION_RESULTS.read_text())}
@@ -401,14 +495,15 @@ class DemoSwitchRequest(BaseModel):
 
 
 async def require_local_ceo(
-    client: httpx.AsyncClient, authorization: str | None
+    client: httpx.AsyncClient, authorization: str | None, demo_role: str | None = None
 ) -> tuple[str, dict[str, object]]:
     settings = get_settings()
     if not _local_demo_enabled() or not settings.supabase_secret_key:
         raise HTTPException(status_code=404, detail="Local demo administration is unavailable")
     token = await require_session(client, authorization)
     identity = await _identity(client, settings, token)
-    if identity["role"] != "CEO":
+    _, active_role = await _context_token(client, settings, token, identity, demo_role)
+    if identity["role"] != "CEO" or active_role != "CEO":
         raise HTTPException(status_code=403, detail="CEO role required for this local demo action")
     return token, identity
 
@@ -417,36 +512,18 @@ async def require_local_ceo(
 async def switch_demo_user(
     request: DemoSwitchRequest,
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     if request.role not in DEMO_ROLES or not _local_demo_enabled():
         raise HTTPException(status_code=404, detail="Local demo user switching is unavailable")
-    credentials = json.loads(DEMO_CREDENTIALS.read_text())
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-        actor_token = await require_session(client, authorization)
-        actor = await verify_supabase_session(client, get_settings(), actor_token)
-        if not actor or not str(actor.get("email", "")).endswith("@novacore.demo"):
-            raise HTTPException(
-                status_code=403, detail="Only a signed-in local demo user can switch roles"
-            )
-        target = credentials.get(request.role)
-        if not isinstance(target, dict) or not target.get("email") or not target.get("password"):
-            raise HTTPException(status_code=503, detail="Local demo credentials are unavailable")
+        actor_token = bearer_token(authorization)
         settings = get_settings()
-        response = await client.post(
-            f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
-            params={"grant_type": "password"},
-            headers={"apikey": settings.supabase_publishable_key.get_secret_value()},
-            json={"email": target["email"], "password": target["password"]},
-        )
-    if response.is_error:
-        raise HTTPException(status_code=503, detail="Local demo sign-in failed")
-    session = response.json()
-    return {
-        "access_token": session["access_token"],
-        "refresh_token": session["refresh_token"],
-        "expires_in": session.get("expires_in"),
-        "role": request.role,
-    }
+        actor_identity = await _identity(client, settings, actor_token)
+        await _context_token(client, settings, actor_token, actor_identity, request.role)
+        if actor_identity["role"] != "CEO" and request.role != actor_identity["role"]:
+            raise HTTPException(status_code=403, detail="Only a CEO identity can change demo roles")
+    return {"active_role": request.role}
 
 
 async def _store_ingested(
@@ -571,6 +648,7 @@ async def ingest_file(
     authorization: str | None = Header(default=None),
     source_name: str = Header(alias="X-Source-Name"),
     access_role: str = Header(default="CEO", alias="X-Access-Role"),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
     if not _local_demo_enabled() or not settings.supabase_secret_key:
@@ -601,7 +679,7 @@ async def ingest_file(
     stored_path.chmod(0o600)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
-            _, identity = await require_local_ceo(client, authorization)
+            _, identity = await require_local_ceo(client, authorization, demo_role)
             try:
                 candidates = await asyncio.to_thread(
                     extract_pdf if suffix == ".pdf" else extract_image_ocr,
@@ -641,6 +719,7 @@ async def ingest_file(
 async def ingest_structured(
     request: StructuredIngestRequest,
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
     if not _local_demo_enabled() or not settings.supabase_secret_key:
@@ -657,7 +736,7 @@ async def ingest_structured(
     except IngestionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
-        _, identity = await require_local_ceo(client, authorization)
+        _, identity = await require_local_ceo(client, authorization, demo_role)
         result = await _store_ingested(
             client,
             settings,
@@ -676,11 +755,12 @@ async def ingest_structured(
 @app.post("/api/v1/evaluation/run", tags=["evaluation"])
 async def run_evaluation(
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     if not _local_demo_enabled():
         raise HTTPException(status_code=404, detail="Local evaluation is unavailable")
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-        await require_local_ceo(client, authorization)
+        await require_local_ceo(client, authorization, demo_role)
     try:
         module = runpy.run_path(
             str(REPOSITORY_ROOT / "apps" / "api" / "scripts" / "evaluate_local_retrieval.py")
@@ -701,48 +781,100 @@ async def run_evaluation(
 async def query_knowledge(
     request: QueryRequest,
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> QueryResponse:
     request_id = str(uuid4())
     settings = get_settings()
     timeout = httpx.Timeout(25.0, connect=5.0)
     fallback_used = False
+    request_started = time.perf_counter()
+    timings: dict[str, float | None] = {
+        "auth_session_ms": 0.0,
+        "embedding_ms": 0.0,
+        "retrieval_and_ranking_ms": 0.0,
+        "ranking_only_ms": None,
+        "gemini_ms": 0.0,
+        "citation_validation_ms": 0.0,
+    }
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            access_token = await require_session(client, authorization)
-            user = await verify_supabase_session(client, settings, access_token)
-            if not user:
-                raise HTTPException(status_code=401, detail="Invalid session")
-            embedding = await create_embedding(client, settings, request.query)
-            evidence = await retrieve_chunks(
-                client, settings, access_token, request.query, embedding
-            )
+            auth_started = time.perf_counter()
+            try:
+                actor_token = bearer_token(authorization)
+                identity = await _identity(client, settings, actor_token)
+                access_token, active_role = await _context_token(
+                    client, settings, actor_token, identity, demo_role
+                )
+            finally:
+                timings["auth_session_ms"] = round(
+                    (time.perf_counter() - auth_started) * 1000, 1
+                )
+            embedding_started = time.perf_counter()
+            try:
+                embedding = await create_embedding(client, settings, request.query)
+            finally:
+                timings["embedding_ms"] = round(
+                    (time.perf_counter() - embedding_started) * 1000, 1
+                )
+            retrieval_started = time.perf_counter()
+            try:
+                evidence = await retrieve_chunks(
+                    client, settings, access_token, request.query, embedding
+                )
+            finally:
+                timings["retrieval_and_ranking_ms"] = round(
+                    (time.perf_counter() - retrieval_started) * 1000, 1
+                )
             if not evidence:
                 result = insufficient_evidence()
                 model_context: list[dict[str, object]] = []
                 generation_model = None
             else:
                 prompt, model_context = prepare_generation_context(request.query, evidence)
-                model_output = await generate_claims(client, settings, prompt)
+                generation_started = time.perf_counter()
+                try:
+                    model_output = await generate_claims(client, settings, prompt)
+                finally:
+                    timings["gemini_ms"] = round(
+                        (time.perf_counter() - generation_started) * 1000, 1
+                    )
                 generation_model = model_output.get("_model")
                 fallback_used = model_output.get("_fallback_used") is True
+                validation_started = time.perf_counter()
                 result = validate_generation(model_output, model_context)
+                timings["citation_validation_ms"] = round(
+                    (time.perf_counter() - validation_started) * 1000, 1
+                )
         except httpx.TimeoutException as exc:
             LOGGER.warning("Knowledge request timed out [%s]", request_id)
             raise HTTPException(status_code=503, detail="Knowledge service timed out") from exc
         except httpx.HTTPError as exc:
             LOGGER.warning("Knowledge upstream failed [%s]: %s", request_id, type(exc).__name__)
             raise HTTPException(status_code=503, detail="Knowledge service unavailable") from exc
+        except IntegrationFailure as exc:
+            exc.timing_ms = timings | {
+                "total_ms": round((time.perf_counter() - request_started) * 1000, 1)
+            }
+            LOGGER.warning(
+                "Ask failed [%s] code=%s timing_ms=%s",
+                request_id,
+                exc.code,
+                json.dumps(exc.timing_ms, sort_keys=True),
+            )
+            raise
 
     created_at = datetime.now(UTC).isoformat()
     _append_activity(
         {
-            "user_id": str(user["id"]),
+            "user_id": str(identity["user_id"]),
             "request_id": request_id,
             "query": request.query,
             "state": result["state"],
             "created_at": created_at,
             "evidence_count": len(model_context),
+            "active_role": active_role,
+            "timing_ms": timings,
         }
     )
 
@@ -757,6 +889,13 @@ async def query_knowledge(
             "unauthorized_evidence_sent_to_model": 0,
             "generation_model": generation_model,
             "fallback_used": fallback_used,
+            "active_role": active_role,
+            "timing_ms": timings
+            | {"total_ms": round((time.perf_counter() - request_started) * 1000, 1)},
+            "ranking_timing_note": (
+                "Ranking runs inside the database retrieval RPC; no separate server timing "
+                "is exposed."
+            ),
         },
     )
 
@@ -765,6 +904,7 @@ async def query_knowledge(
 async def get_source(
     source_id: Annotated[UUID, ApiPath()],
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_publishable_key:
@@ -772,7 +912,9 @@ async def get_source(
 
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        access_token = await require_session(client, authorization)
+        actor_token = await require_session(client, authorization)
+        identity = await _identity(client, settings, actor_token)
+        access_token, _ = await _context_token(client, settings, actor_token, identity, demo_role)
         try:
             response = await client.get(
                 f"{settings.supabase_url.rstrip('/')}/rest/v1/knowledge_chunks",
@@ -819,6 +961,7 @@ async def get_source(
 async def get_source_preview(
     source_id: Annotated[UUID, ApiPath()],
     authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     """Open the first RLS-visible chunk belonging to an authorized source."""
     settings = get_settings()
@@ -827,7 +970,9 @@ async def get_source_preview(
 
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        access_token = await require_session(client, authorization)
+        actor_token = await require_session(client, authorization)
+        identity = await _identity(client, settings, actor_token)
+        access_token, _ = await _context_token(client, settings, actor_token, identity, demo_role)
         try:
             response = await client.get(
                 f"{settings.supabase_url.rstrip('/')}/rest/v1/knowledge_chunks",

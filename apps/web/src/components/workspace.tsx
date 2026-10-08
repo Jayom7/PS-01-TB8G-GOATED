@@ -25,6 +25,9 @@ type QueryResult = {
     unauthorized_evidence_sent_to_model: number;
     generation_model: string | null;
     fallback_used: boolean;
+    active_role: string;
+    timing_ms: Record<string, number | null>;
+    ranking_timing_note: string;
   };
 };
 type SourcePreview = {
@@ -60,6 +63,7 @@ function subscribeTheme(callback: () => void) {
 }
 type WorkspaceData = {
   identity: Identity;
+  active_role: string;
   document_count: number;
   chunk_count: number;
   structured_record_count: number;
@@ -71,15 +75,18 @@ type WorkspaceData = {
   gemini: string;
   ingestion: string;
   evaluation: string;
+  latest_evaluation_status: string;
   demo_switch_available: boolean;
 };
 type SecurityData = {
   identity: Identity;
+  active_role: string;
   effective_scope: string;
   trace: {
     created_at: string;
     query_id: string;
     state: string;
+    active_role: string;
     authorized_evidence_count: number;
     unauthorized_evidence_count: number;
     decision: string;
@@ -94,6 +101,7 @@ type EvaluationData = {
   authorization_violations: number;
   results: Record<string, unknown>[];
   completed_at?: string;
+  measured_checks?: Record<string, boolean | number | string | null>;
 };
 
 const DEMO_ROLES = ["CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer"];
@@ -129,6 +137,7 @@ async function readResponse<T>(response: Response): Promise<T> {
       provider_unavailable: "The AI service is unavailable right now. Your question was not answered.",
       provider_timeout: "The AI service took too long to respond. Please try again.",
       provider_invalid_response: "The AI service returned an unusable answer. Please retry.",
+      retrieval_unavailable: "Authorized search could not complete. No answer was generated.",
     };
     const message = response.status === 401
       ? "Your session expired. Sign in again to continue."
@@ -159,11 +168,13 @@ async function currentToken() {
   return data.session?.access_token ?? null;
 }
 
-async function apiGet<T>(path: string) {
+async function apiGet<T>(path: string, demoRole?: string) {
   const token = await currentToken();
   if (!token) throw new Error("Your session expired. Sign in again to continue.");
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  if (demoRole) headers["X-Demo-Role"] = demoRole;
   return readResponse<T>(await fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers,
     cache: "no-store",
     signal: AbortSignal.timeout(20_000),
   }));
@@ -179,6 +190,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceClosing, setSourceClosing] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
+  const [activeRole, setActiveRole] = useState("");
   const [sources, setSources] = useState<Source[] | null>(null);
   const [security, setSecurity] = useState<SecurityData | null>(null);
   const [evaluation, setEvaluation] = useState<EvaluationData | null>(null);
@@ -195,6 +207,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const sourceTrigger = useRef<HTMLElement | null>(null);
   const sourceClose = useRef<HTMLButtonElement>(null);
   const sourceCloseTimer = useRef<number | null>(null);
+  const roleRestoreStarted = useRef(false);
+  const activeRoleRef = useRef("");
   const sourceOpen = activeSource !== null;
   const closeSource = useCallback(() => {
     if (!sourceOpen || sourceClosing) return;
@@ -209,12 +223,12 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const refreshWorkspace = useCallback(async () => {
     try {
       setError(null);
-      const data = await apiGet<WorkspaceData>("/api/v1/workspace");
-      setWorkspace(data);
+      const data = await apiGet<WorkspaceData>("/api/v1/workspace", activeRole || undefined);
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setWorkspace(data);
     } catch (cause) {
       setError(networkMessage(cause, "Workspace information is unavailable."));
     }
-  }, []);
+  }, [activeRole]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refreshWorkspace(); }, 0);
@@ -223,6 +237,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+  useEffect(() => { activeRoleRef.current = activeRole; }, [activeRole]);
   useEffect(() => {
     if (sourceOpen) sourceClose.current?.focus();
     else sourceTrigger.current?.focus();
@@ -261,7 +276,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       }
       const response = await fetch(`${API_BASE}/api/v1/chat/query`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         body: JSON.stringify({ query: question }),
         signal: AbortSignal.timeout(90_000),
       });
@@ -286,9 +301,10 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       excerpt: "Loading the exact source excerpt…",
     });
     setSourceError(null);
+    const requestedRole = activeRole;
     try {
-      const source = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(citation.citation_id)}`);
-      setActiveSource(source);
+      const source = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(citation.citation_id)}`, activeRole || undefined);
+      if (activeRoleRef.current === requestedRole) setActiveSource(source);
     } catch (cause) {
       setSourceError(cause instanceof Error ? cause.message : "This source is unavailable.");
     }
@@ -307,38 +323,60 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       excerpt: "Loading the first authorized excerpt…",
     });
     setSourceError(null);
+    const requestedRole = activeRole;
     try {
-      const preview = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(source.id)}/preview`);
-      setActiveSource(preview);
+      const preview = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(source.id)}/preview`, activeRole || undefined);
+      if (activeRoleRef.current === requestedRole) setActiveSource(preview);
     } catch (cause) {
       setSourceError(networkMessage(cause, "This source is unavailable."));
     }
   }
 
-  async function switchDemoUser(role: string) {
+  const switchDemoUser = useCallback(async (role: string) => {
     if (!workspace?.demo_switch_available || pending) return;
     setPending(true);
     setError(null);
     try {
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
-      const switched = await readResponse<{ access_token: string; refresh_token: string }>(await fetch(`${API_BASE}/api/v1/demo/switch`, {
+      const switched = await readResponse<{ active_role: string }>(await fetch(`${API_BASE}/api/v1/demo/switch`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         body: JSON.stringify({ role }),
       }));
-      const { error: authError } = await createClient().auth.setSession(switched);
-      if (authError) throw authError;
+      activeRoleRef.current = switched.active_role;
+      setActiveRole(switched.active_role);
+      window.localStorage.setItem("clearframe-demo-role", switched.active_role);
       setResult(null);
+      setSources(null);
+      setSecurity(null);
+      setEvaluation(null);
+      if (sourceCloseTimer.current !== null) window.clearTimeout(sourceCloseTimer.current);
+      setActiveSource(null);
+      setSourceClosing(false);
       setWorkspace(null);
-      await refreshWorkspace();
-      router.refresh();
     } catch (cause) {
       setError(networkMessage(cause, "Could not switch the demo account."));
     } finally {
       setPending(false);
     }
-  }
+  }, [activeRole, pending, workspace?.demo_switch_available]);
+
+  useEffect(() => {
+    if (!workspace || activeRole || roleRestoreStarted.current) return;
+    roleRestoreStarted.current = true;
+    const stored = workspace.demo_switch_available
+      ? window.localStorage.getItem("clearframe-demo-role")
+      : null;
+    const role = stored && DEMO_ROLES.includes(stored) ? stored : workspace.active_role;
+    const timer = window.setTimeout(() => {
+      if (role === workspace.active_role) {
+        activeRoleRef.current = role;
+        setActiveRole(role);
+      } else void switchDemoUser(role);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeRole, switchDemoUser, workspace]);
 
   async function signOut() {
     const { error: signOutError } = await createClient().auth.signOut();
@@ -354,32 +392,32 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     setPending(true);
     setError(null);
     try {
-      const data = await apiGet<{ sources: Source[] }>("/api/v1/sources");
-      setSources(data.sources);
+      const data = await apiGet<{ sources: Source[] }>("/api/v1/sources", activeRole || undefined);
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setSources(data.sources);
     } catch (cause) {
       setError(networkMessage(cause, "Authorized sources are unavailable."));
     } finally {
       setPending(false);
     }
-  }, []);
+  }, [activeRole]);
 
   const loadSecurity = useCallback(async () => {
     setPending(true);
     setError(null);
-    try { setSecurity(await apiGet<SecurityData>("/api/v1/security")); }
+    try { setSecurity(await apiGet<SecurityData>("/api/v1/security", activeRole || undefined)); }
     catch (cause) { setError(networkMessage(cause, "Security status is unavailable.")); }
     finally { setPending(false); }
-  }, []);
+  }, [activeRole]);
 
   const loadEvaluation = useCallback(async () => {
     setPending(true);
     setError(null);
     try {
-      const data = await apiGet<{ state: string; result: EvaluationData | null }>("/api/v1/evaluation");
+      const data = await apiGet<{ state: string; result: EvaluationData | null }>("/api/v1/evaluation", activeRole || undefined);
       setEvaluation(data.result);
     } catch (cause) { setError(networkMessage(cause, "Evaluation state is unavailable.")); }
     finally { setPending(false); }
-  }, []);
+  }, [activeRole]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -412,6 +450,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           "Content-Type": ingestFile.type || "application/octet-stream",
           "X-Source-Name": encodeURIComponent(ingestFile.name),
           "X-Access-Role": structuredMeta.accessRole,
+          ...(activeRole ? { "X-Demo-Role": activeRole } : {}),
         },
         body: ingestFile,
         signal: AbortSignal.timeout(180_000),
@@ -437,7 +476,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
       const response = await fetch(`${API_BASE}/api/v1/ingest/structured`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         body: JSON.stringify({ table: structuredMeta.table, row_id: structuredMeta.rowId, source_name: structuredMeta.sourceName, fields, access_role: structuredMeta.accessRole }),
         signal: AbortSignal.timeout(90_000),
       });
@@ -457,14 +496,14 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
       const payload = await readResponse<{ result: EvaluationData }>(await fetch(`${API_BASE}/api/v1/evaluation/run`, {
-        method: "POST", headers: { Authorization: `Bearer ${token}` },
+        method: "POST", headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
       }));
       setEvaluation(payload.result);
     } catch (cause) { setError(networkMessage(cause, "The evaluation run failed.")); }
     finally { setPending(false); }
   }
 
-  const role = workspace?.identity.role ?? "Loading";
+  const role = activeRole || workspace?.active_role || workspace?.identity.role || "Loading";
   const userName = workspace?.identity.display_name ?? identity;
   const filteredSources = (sources ?? []).filter((source) =>
     `${source.source_name} ${source.source_type} ${source.id}`.toLocaleLowerCase().includes(sourceFilter.trim().toLocaleLowerCase()),
@@ -500,15 +539,15 @@ export default function Workspace({ identity, view }: { identity: string; view: 
             ))}
           </nav>
           <div className="rail-footer">
-            <p className="rail-security-note"><Icon name="lock" size={14} />Access follows your authenticated role.</p>
+          <p className="rail-security-note"><Icon name="lock" size={14} />Access follows the active demo context.</p>
             <details className="account-menu" open={accountOpen} onToggle={(event) => setAccountOpen((event.currentTarget as HTMLDetailsElement).open)}>
               <summary className="account-trigger" aria-label={`Account menu for ${userName}`}>
                 <span className="account-avatar">{userName.slice(0, 1).toUpperCase()}</span>
-                <span className="account-identity"><strong>{userName}</strong><small>{role}</small></span>
+                <span className="account-identity"><strong>{userName}</strong><small>Active context · {role}</small></span>
                 <Icon name="chevron" size={16} />
               </summary>
               <div className="account-popover">
-                <p className="account-current"><strong>{userName}</strong><span>{workspace?.identity.email ?? identity}</span><small>Current role · {role}</small></p>
+                <p className="account-current"><strong>Authenticated identity · {userName}</strong><span>{workspace?.identity.email ?? identity}</span><small>Active demo context · {role}</small></p>
                 {workspace?.demo_switch_available && <label className="field-label account-role-field">Switch demo role<select aria-label="Switch demo role" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending} onChange={(event) => void switchDemoUser(event.target.value)}>{DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}</select></label>}
                 <button className="account-action" type="button" onClick={() => setSelectedTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "Use dark theme" : "Use light theme"}</button>
                 <button className="account-action account-logout" type="button" onClick={() => void signOut()}>Log out</button>
@@ -540,6 +579,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
             <IngestView
               role={role}
               available={workspace?.ingestion === "ready"}
+              error={error}
               accessRole={structuredMeta.accessRole}
               setAccessRole={(accessRole) => setStructuredMeta((value) => ({ ...value, accessRole }))}
               file={ingestFile}
@@ -599,24 +639,26 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
         {result.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response" role="status"><div className="answer-avatar" aria-hidden="true">C</div><div><p className="response-primary">I couldn’t find enough authorized evidence to answer.</p><p className="response-secondary">Try a more specific question or ask your workspace administrator about available sources.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy">
           {result.claims.map((claim, index) => <p key={`${result.request_id}-${index}`}>{claim.text} {claim.citations.map((citation) => <button className="inline-citation" key={citation.citation_id} type="button" aria-label={`Open source: ${citation.title ?? "Evidence"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(result.claims, citation.citation_id)}]</button>)}</p>)}
           {result.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Claims without a valid source citation were omitted.</p>}
-          <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />{result.state === "CITATION_VALIDATED" ? "Citations validated" : "Partially validated"}</span><span>{result.trace.evidence_items_sent_to_model} authorized evidence items</span>{result.trace.generation_model && <span>{result.trace.generation_model}{result.trace.fallback_used ? " · fallback" : ""}</span>}
+          <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />{result.state === "CITATION_VALIDATED" ? "Citations validated" : "Partially validated"}</span><span>{result.trace.evidence_items_sent_to_model} authorized evidence items</span>{result.trace.generation_model && <span>{result.trace.generation_model}{result.trace.fallback_used ? " · fallback" : ""}</span>}<span className="answer-latency" title="Database ranking is included in retrieval timing">Total {formatLatency(result.trace.timing_ms.total_ms)} · retrieval + ranking {formatLatency(result.trace.timing_ms.retrieval_and_ranking_ms)}</span>
             {refs.length > 0 && <button className="view-sources" type="button" onClick={(event) => onSource(refs[0], event.currentTarget)}>View sources <Icon name="arrow" size={15} /></button>}
           </div>
+          <details className="latency-details"><summary>Timing details</summary><span>Session/auth {formatLatency(result.trace.timing_ms.auth_session_ms)} · embedding {formatLatency(result.trace.timing_ms.embedding_ms)} · retrieval + database ranking {formatLatency(result.trace.timing_ms.retrieval_and_ranking_ms)} · ranking alone not exposed · Gemini {formatLatency(result.trace.timing_ms.gemini_ms)} · citation checks {formatLatency(result.trace.timing_ms.citation_validation_ms)} · total {formatLatency(result.trace.timing_ms.total_ms)}</span></details>
         </div></div>}
       </div> : <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="chat" size={22} /></div><p>Ask about a document, image, or business record.</p><div className="question-examples" aria-label="Example questions">{exampleQuestions.map((example) => <button className="sample-question" type="button" key={example} onClick={() => setQuery(example)}><span>{example}</span><Icon name="arrow" size={17} /></button>)}</div></div>}
-      {pending && <p className="request-status" role="status">Searching authorized sources…</p>}
+      {pending && <p className="request-status" role="status"><span className="loading-dot" />Checking your session, searching authorized sources, and preparing a cited answer…</p>}
       {error && <p className="request-error" role="alert">{error}</p>}
     </div>
-    <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask a question about your knowledge..." maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">Your session scopes retrieval and citation lookup.</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Searching" : "Ask"}</span></button></div></form></div>
+    <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask a question about your knowledge..." maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Please wait; duplicate requests are disabled." : "Enter to ask · Shift + Enter for a new line"}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Searching" : "Ask"}</span></button></div></form></div>
   </>;
 }
 
 function DashboardView({ data, error, onRefresh, onNavigate }: { data: WorkspaceData | null; error: string | null; onRefresh: () => void; onNavigate: (view: View) => void }) {
   if (!data) return <PageState title="Dashboard" error={error} pending={!error} onRefresh={onRefresh} />;
   return <div className="data-page"><PageHeading title="Dashboard" description="Live state from your authenticated Clearframe workspace." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
-    <div className="dashboard-identity"><span className="user-indicator">{data.identity.display_name.slice(0, 1).toUpperCase()}</span><div><strong>{data.identity.display_name}</strong><span>{data.identity.email} · {data.identity.role}</span></div><span className="status-pill status-good">Authorization active</span></div>
+    <div className="dashboard-identity"><span className="user-indicator">{data.identity.display_name.slice(0, 1).toUpperCase()}</span><div><strong>Authenticated · {data.identity.display_name}</strong><span>{data.identity.email} · Active context: {data.active_role}</span></div><span className="status-pill status-good">Authorization {data.authorization}</span></div>
     <dl className="metric-strip"><Metric label="Authorized sources" value={data.document_count} /><Metric label="Searchable chunks" value={data.chunk_count} /><Metric label="Structured records" value={data.structured_record_count} /></dl>
-    <div className="dashboard-columns"><section className="data-section"><SectionTitle title="System connections" /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Evaluation" value={data.evaluation} /></div></section>
+    <div className="dashboard-shortcuts" aria-label="Workspace shortcuts">{(["Ask", "Sources", "Ingest", "Security", "Evaluation"] as const).map((item) => <button className="quiet-button" key={item} type="button" onClick={() => onNavigate(item)}>{item}</button>)}</div>
+    <div className="dashboard-columns"><section className="data-section"><SectionTitle title="System connections" /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Latest evaluation" value={data.latest_evaluation_status} /></div></section>
       <section className="data-section"><SectionTitle title="Recent queries" action={<button className="text-button" type="button" onClick={() => onNavigate("Ask")}>Ask a question</button>} />{data.recent_queries.length ? <ol className="recent-query-list">{data.recent_queries.slice(0, 6).map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.query}</span><small>{item.state.replaceAll("_", " ")} · {formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No queries in this API session yet.</p>}</section></div>
   </div>;
 }
@@ -632,8 +674,8 @@ function SourcesView({ sources, filter, onFilter, pending, error, onOpen, onRefr
   </div>;
 }
 
-function IngestView({ role, available, accessRole, setAccessRole, file, setFile, result, pending, structuredMeta, setStructuredMeta, structuredJson, setStructuredJson, onUpload, onStructured }: {
-  role: string; available: boolean; accessRole: string; setAccessRole: (role: string) => void; file: File | null; setFile: (file: File | null) => void; result: string | null; pending: boolean;
+function IngestView({ role, available, error, accessRole, setAccessRole, file, setFile, result, pending, structuredMeta, setStructuredMeta, structuredJson, setStructuredJson, onUpload, onStructured }: {
+  role: string; available: boolean; error: string | null; accessRole: string; setAccessRole: (role: string) => void; file: File | null; setFile: (file: File | null) => void; result: string | null; pending: boolean;
   structuredMeta: { table: string; rowId: string; sourceName: string; accessRole: string }; setStructuredMeta: (update: Partial<{ table: string; rowId: string; sourceName: string; accessRole: string }>) => void;
   structuredJson: string; setStructuredJson: (value: string) => void; onUpload: (event: FormEvent<HTMLFormElement>) => void; onStructured: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -641,17 +683,18 @@ function IngestView({ role, available, accessRole, setAccessRole, file, setFile,
   return <div className="data-page"><PageHeading title="Ingest" description="Index source files and structured records into the secured knowledge store." />
     {!available && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>The local ingestion service is unavailable. Confirm the local API and Supabase are running.</span></div>}
     {available && role !== "CEO" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>Ingestion is restricted to the CEO demo account. Your current role remains read-only.</span></div>}
-    {result && <div className="success-notice" role="status">{result}</div>}
+    {error && <p className="request-error" role="alert">{error}</p>}
+    <div className={`ingest-progress ${error ? "ingest-failed" : result ? "ingest-indexed" : ""}`} role="status"><strong>{error ? "Failed" : result ? "Indexed" : pending ? "Uploading, processing, and embedding" : file ? "Ready to upload" : "Ready"}</strong><span>{error ? "Your selected file or record remains available to retry." : result ?? (pending ? "The API extracts and indexes this source before returning." : "PDF, PNG, JPEG, or structured records can be indexed here.")}</span></div>
     <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div>
-      <label className="file-drop"><input type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" disabled={!canIngest || pending} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><Icon name="files" size={20} /><strong>{file?.name ?? "Choose a source file"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : "PDF text and scanned pages, or image OCR"}</span></label>
+      <label className="file-drop"><input type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" disabled={!canIngest || pending} onChange={(event) => { const selected = event.target.files?.[0] ?? null; const extension = selected?.name.toLowerCase().split(".").pop(); if (selected && (!extension || !["pdf", "png", "jpg", "jpeg"].includes(extension) || selected.size === 0 || selected.size > 25 * 1024 * 1024)) { setFile(null); event.currentTarget.value = ""; return; } setFile(selected); }} /><Icon name="files" size={20} /><strong>{file?.name ?? "Choose a source file"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : "PDF text and scanned pages, or image OCR · max 25 MB"}</span></label>
       <label className="field-label">Grant source to<select value={accessRole} disabled={!canIngest || pending} onChange={(event) => setAccessRole(event.target.value)}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
-      <button className="primary-action" type="submit" disabled={!canIngest || pending || !file}>{pending ? "Indexing source…" : "Upload and index"}</button>
+      <button className="primary-action" type="submit" disabled={!canIngest || pending || !file}>{pending ? "Uploading and indexing…" : "Upload and index"}</button>
       <p className="form-footnote">Files are stored in the local private ingestion folder. The selected role is the only role granted access.</p>
     </form>
     <form className="ingest-form" onSubmit={onStructured}><div className="form-title"><Icon name="table" size={18} /><div><h2>Structured record</h2><p>Canonical text and embeddings are generated server-side.</p></div></div>
       <div className="field-pair"><label className="field-label">Table<input value={structuredMeta.table} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ table: event.target.value })} required /></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>
       <label className="field-label">Source name<input value={structuredMeta.sourceName} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ sourceName: event.target.value })} required /></label>
-      <label className="field-label">Record fields<textarea className="json-input" value={structuredJson} disabled={!canIngest || pending} onChange={(event) => setStructuredJson(event.target.value)} spellCheck={false} /></label>
+      <label className="field-label">Record fields<textarea className="json-input" value={structuredJson} disabled={!canIngest || pending} onChange={(event) => setStructuredJson(event.target.value)} spellCheck={false} aria-describedby="structured-json-help" /></label><small className="field-hint" id="structured-json-help">JSON object with scalar values: strings, numbers, booleans, or null.</small>
       <label className="field-label">Grant source to<select value={structuredMeta.accessRole} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ accessRole: event.target.value })}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
       <button className="primary-action" type="submit" disabled={!canIngest || pending}>{pending ? "Indexing record…" : "Index structured record"}</button>
     </form></div>
@@ -661,15 +704,16 @@ function IngestView({ role, available, accessRole, setAccessRole, file, setFile,
 function SecurityView({ data, pending, error, onRefresh }: { data: SecurityData | null; pending: boolean; error: string | null; onRefresh: () => void }) {
   if (!data) return <PageState title="Security" pending={pending} error={error} onRefresh={onRefresh} />;
   return <div className="data-page"><PageHeading title="Security" description="Identity and authorization decisions from the current API session." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh trace</button>} />
-    <div className="security-identity"><span className="security-mark"><Icon name="lock" size={20} /></span><div><strong>{data.identity.display_name}</strong><span>{data.identity.email} · {data.identity.roles.join(", ") || "No assigned role"}</span></div><span className="status-pill status-good">Session verified</span></div>
+    <div className="security-identity"><span className="security-mark"><Icon name="lock" size={20} /></span><div><strong>Authenticated · {data.identity.display_name}</strong><span>{data.identity.email} · Active demo context: {data.active_role}</span></div><span className="status-pill status-good">Session verified</span></div>
     <section className="data-section"><SectionTitle title="Effective access scope" /><p className="scope-copy">{data.effective_scope}</p><div className="security-checks">{Object.entries(data.security_tests).map(([label, value]) => <div key={label}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></div>)}</div></section>
-    <section className="data-section"><SectionTitle title="Recent retrieval decisions" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision}</strong><span>{entry.authorized_evidence_count} authorized evidence items · {entry.unauthorized_evidence_count} unauthorized items supplied</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question to see a real retrieval trace for this session.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Recent events are held in this API process and clear when it restarts.</p></section>
+    <section className="data-section"><SectionTitle title="Recent retrieval decisions" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count} authorized evidence items · {entry.unauthorized_evidence_count} unauthorized items supplied</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question to see a real retrieval trace for this session.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Recent events are held in this API process and clear when it restarts.</p></section>
   </div>;
 }
 
 function EvaluationView({ data, pending, error, role, onRefresh, onRun }: { data: EvaluationData | null; pending: boolean; error: string | null; role: string; onRefresh: () => void; onRun: () => void }) {
   return <div className="data-page"><PageHeading title="Evaluation" description="Measured results from the local NovaCore retrieval and authorization suite." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
     {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : <><h2>No evaluation run recorded</h2><p>Run the real retrieval suite to measure recall, ranking, modality coverage, and authorization boundaries.</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Running evaluation…" : "Run evaluation"}</button>{role !== "CEO" && <small>Switch to the CEO demo user to run the local test suite.</small>}</div> : <>
+      <p className="evaluation-scope">Retrieval quality · Recall@12 {formatMetric(data.retrieval_recall_at_k)} · MRR {formatMetric(data.mean_reciprocal_rank)} <span>Authorization security · {data.authorization_violations} measured leaks</span> <span>Citation validation · {String(data.measured_checks?.citation_provenance_valid ?? "not measured")} provenance checks</span> <span>Latency · {formatLatency(data.measured_checks?.mean_latency_ms)}</span></p>
       <div className="evaluation-summary"><div><span>Dataset</span><strong>{data.dataset}</strong></div><div><span>Queries</span><strong>{data.query_count}</strong></div><div><span>Recall@12</span><strong>{formatMetric(data.retrieval_recall_at_k)}</strong></div><div><span>Mean reciprocal rank</span><strong>{formatMetric(data.mean_reciprocal_rank)}</strong></div><div><span>Authorization leaks</span><strong className={data.authorization_violations ? "metric-bad" : "metric-good"}>{data.authorization_violations}</strong></div></div>
       <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong></td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
       <p className="trace-disclaimer">Retrieved with authenticated demo users against the local database. This run measures retrieval and row-level authorization; it does not score semantic answer quality.</p>
@@ -708,3 +752,4 @@ function formatTime(value: string) {
   return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 function formatMetric(value: number) { return Number.isFinite(value) ? value.toFixed(3) : "—"; }
+function formatLatency(value: unknown) { return typeof value === "number" ? `${Math.round(value)} ms` : "—"; }

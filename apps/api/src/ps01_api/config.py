@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_embedding_model: str = "gemini-embedding-2"
     embedding_dimensions: int = 1536
-    gemini_chat_model: str = "gemini-3.8-flash"
-    gemini_fallback_chat_model: str = "gemini-3.6-flash"
+    gemini_chat_model: str = "gemini-3.7-flash"
+    gemini_fallback_chat_model: str = "gemini-3.8-flash"
 
 
 @lru_cache

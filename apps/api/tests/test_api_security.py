@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from ps01_api.integrations import IntegrationFailure
@@ -61,11 +64,18 @@ class TestApiSecurity:
 
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
+            patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate_mock,
         ):
             auth.return_value = {"id": "trusted-session-user"}
+            identity.return_value = {
+                "user_id": "trusted-session-user",
+                "organization_id": "trusted-org",
+                "role": "CEO",
+                "roles": ["CEO"],
+            }
             embed.return_value = [0.0] * 1536
             retrieve.return_value = [authorized]
             generate_mock.side_effect = generate
@@ -89,11 +99,18 @@ class TestApiSecurity:
     def test_empty_authorized_retrieval_never_calls_the_generator(self) -> None:
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
+            patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
         ):
             auth.return_value = {"id": "trusted-session-user"}
+            identity.return_value = {
+                "user_id": "trusted-session-user",
+                "organization_id": "trusted-org",
+                "role": "CEO",
+                "roles": ["CEO"],
+            }
             embed.return_value = [0.0] * 1536
             retrieve.return_value = []
 
@@ -122,11 +139,18 @@ class TestApiSecurity:
     def test_provider_timeout_has_safe_distinct_error_contract(self) -> None:
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
+            patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
         ):
             auth.return_value = {"id": "trusted-session-user"}
+            identity.return_value = {
+                "user_id": "trusted-session-user",
+                "organization_id": "trusted-org",
+                "role": "CEO",
+                "roles": ["CEO"],
+            }
             embed.return_value = [0.0] * 1536
             retrieve.return_value = [{"chunk_id": "authorized", "content": "evidence"}]
             generate.side_effect = IntegrationFailure(
@@ -139,7 +163,88 @@ class TestApiSecurity:
             )
 
         assert response.status_code == 503
-        assert response.json() == {
-            "detail": "The answer service took too long to respond. Please try again.",
-            "code": "provider_timeout",
-        }
+        body = response.json()
+        assert body["detail"] == "The answer service took too long to respond. Please try again."
+        assert body["code"] == "provider_timeout"
+        assert body["timing_ms"]["gemini_ms"] >= 0
+        assert body["timing_ms"]["total_ms"] >= body["timing_ms"]["gemini_ms"]
+
+    def test_non_ceo_cannot_forge_a_ceo_context_header(self) -> None:
+        with (
+            patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
+            patch("ps01_api.main._local_demo_enabled", return_value=True),
+            patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
+        ):
+            identity.return_value = {
+                "user_id": "finance-user",
+                "organization_id": "trusted-org",
+                "role": "Finance Manager",
+                "roles": ["Finance Manager"],
+            }
+            response = self.client.post(
+                "/api/v1/chat/query",
+                headers={
+                    "Authorization": "Bearer trusted-finance-session",
+                    "X-Demo-Role": "CEO",
+                },
+                json={"query": "Show all employee information."},
+            )
+
+        assert response.status_code == 403
+        embed.assert_not_awaited()
+
+    def test_ingestion_rejects_unsupported_file_type(self) -> None:
+        with patch("ps01_api.main._local_demo_enabled", return_value=True):
+            response = self.client.post(
+                "/api/v1/ingest/file",
+                headers={"X-Source-Name": "notes.txt"},
+                content=b"not an accepted source format",
+            )
+
+        assert response.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_non_ceo_cannot_request_ceo_demo_context() -> None:
+    from ps01_api.config import get_settings
+    from ps01_api.main import _context_token
+
+    identity = {"role": "Finance Manager", "roles": ["Finance Manager"]}
+    client = AsyncMock()
+    with patch("ps01_api.main._local_demo_enabled", return_value=True):
+        with pytest.raises(HTTPException) as error:
+            await _context_token(client, get_settings(), "finance-user-token", identity, "CEO")
+
+    assert error.value.status_code == 403
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_uses_server_side_role_session_without_returning_it(tmp_path) -> None:
+    import json
+
+    from ps01_api.config import get_settings
+    from ps01_api.main import _context_token
+
+    credentials_path = tmp_path / "demo-credentials.json"
+    credentials_path.write_text(
+        json.dumps({"Finance Manager": {"email": "finance@novacore.demo", "password": "demo"}})
+    )
+    client = AsyncMock()
+    client.post.return_value = SimpleNamespace(
+        is_error=False,
+        json=lambda: {"access_token": "server-only-role-token", "expires_in": 3600},
+    )
+    identity = {"role": "CEO", "roles": ["CEO"]}
+
+    with (
+        patch("ps01_api.main._local_demo_enabled", return_value=True),
+        patch("ps01_api.main.DEMO_CREDENTIALS", credentials_path),
+    ):
+        token, role = await _context_token(
+            client, get_settings(), "original-ceo-session", identity, "Finance Manager"
+        )
+
+    assert token == "server-only-role-token"
+    assert role == "Finance Manager"
+    assert client.post.await_args.kwargs["json"]["email"] == "finance@novacore.demo"

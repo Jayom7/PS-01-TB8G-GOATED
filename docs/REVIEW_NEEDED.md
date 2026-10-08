@@ -5,8 +5,11 @@ or deeper review. It does not certify the system as secure.
 
 ## R-001 — RLS-aware retrieval
 
-- **Implemented:** the API verifies the Supabase bearer session and forwards
-  that same token to the invoker retrieval RPC; query code does not use the
+- **Implemented:** the API verifies the authenticated Supabase identity. For a
+  local CEO demo account, an explicitly selected role context is validated on
+  the server and resolved to that role's own Supabase session; that session is
+  held only in API memory and forwarded to the invoker retrieval RPC. Other
+  identities can only use roles assigned to them. Query code does not use the
   secret key. The migration enables RLS on every app table, removes default
   API-role table privileges before regranting required reads, and restricts
   retrieval RPC execution to authenticated users.
@@ -42,13 +45,15 @@ or deeper review. It does not certify the system as secure.
 ## R-003 — Demo identity lifecycle
 
 - **Implemented:** real Supabase password sign-in, server route gate, and
-  authenticated API calls. The client cannot submit role, user, organization,
-  ACL, or evidence fields in a query.
+  authenticated API calls. Role context is separate from the signed-in
+  identity; the browser never receives the role account's access token. The
+  client cannot submit user, organization, ACL, or evidence fields in a query.
 - **Verified locally:** five NovaCore auth users, profiles, and role records
-  were created in local Supabase. Browser CEO-to-HR switching returned a new
-  Supabase session and the dashboard/source counts changed to the HR scope.
-  Local credentials are stored separately in a git-ignored owner-only file. No
-  hosted users were created.
+  exist in local Supabase. API tests verify CEO-to-role session resolution and
+  deny a Finance identity's forged CEO context. Browser switching to all five
+  roles changes authorized-source counts while preserving the CEO identity;
+  RLS filtering hides the Acme invoice from HR. Local credentials remain in a
+  git-ignored owner-only file. No hosted users were created.
 - **Boundary:** switching is only enabled when both local Supabase and the
   ignored demo credential file are present. Do not enable this broker for a
   hosted project.
@@ -64,34 +69,51 @@ or deeper review. It does not certify the system as secure.
   excerpt work against the production build.
 - **Not implemented:** background ingestion jobs. The local upload and
   service-key persistence paths have not been reviewed for hosted deployment.
-- **Next review:** exercise browser-uploaded file/structured flows end to end and
-  review source provenance, write rollback, and access inheritance before any
-  hosted ingestion deployment.
+- **Current runtime check:** browser ingestion controls were disabled because
+  this API process did not have a local Supabase admin key. The CLI could not
+  read local container settings while the Docker daemon socket was unavailable;
+  no hosted admin credential was sent to the local database.
+- **Progress detail:** the UI reports Ready, an in-progress combined upload /
+  processing / embedding state, Indexed, and Failed. It does not yet receive
+  exact server-side per-stage progress events.
+- **Next review:** start the local API with its local admin key, then exercise
+  browser-uploaded file/structured flows end to end and review source
+  provenance, write rollback, and access inheritance before any hosted
+  ingestion deployment.
 
 ## R-005 — Live provider and database connectivity
 
 - **Verified:** local Supabase Auth and API health/workspace/source requests
-  work. Live Gemini embedding produced 1536 dimensions. In the production
-  browser build, the CEO invoice query returned a real answer with an OCR
-  citation using the 3.6 Flash fallback; opening the citation returned the
-  authorized excerpt. Other generation attempts failed with a bounded timeout,
-  malformed model output, or provider-unavailable response. The provider is
-  usable intermittently but not reliable enough for a multi-query demo.
+  work. Live Gemini embedding produced 1536 dimensions. Earlier, the production
+  browser returned a CEO invoice answer with an OCR citation using 3.6 Flash,
+  and opening the citation returned the authorized excerpt. In the latest live
+  timing check, embedding and authorized retrieval succeeded, but Gemini
+  generation returned HTTP 429 on both configured chat models. Google AI Studio
+  showed 3.8 and 3.6 above the daily cap and 3.7 with one request remaining.
+  Chat configuration is now 3.7 primary and 3.8 fallback. Gemini 2.5 returned
+  HTTP 404 for this key despite unused quota shown in AI Studio. Generation
+  remains unverified after the model change because both configured 3.x models
+  returned HTTP 429 for this key.
 - **Blocked:** hosted database migration and schema checks require Supabase CLI
   authentication or direct database credentials. Current API keys alone do
   not provide the CLI project token or database password.
 
 ## R-008 — Live Gemini answer reliability
 
-- **Implemented:** two configured generation models, bounded requests and
-  retries, explicit fallback tracing, citation membership validation, and
+- **Implemented:** `gemini-3.7-flash` primary generation, one conditional
+  `gemini-3.8-flash` fallback attempt for transient failures, explicit fallback
+  tracing, citation membership validation, and
   distinct safe messages for timeout, unavailable provider, and invalid model
   output.
-- **Observed:** one browser answer succeeded; three requested finance queries
-  and one indexed-document-injection query did not all succeed consistently.
-- **Next review:** inspect provider quota, model availability, and response
-  payloads in Gemini's console. Repeat the four exact demo prompts and both
-  injection cases; preserve raw diagnostics server-side without exposing keys.
+- **Observed:** earlier browser answer succeeded; the latest request reached
+  Gemini after successful embedding/retrieval but received HTTP 429. The 3.8
+  and 3.6 models exceeded their daily cap in AI Studio; 3.7 showed one request
+  remaining but returned HTTP 429 during live verification. 2.5 showed unused
+  quota but returned HTTP 404 for this key. Exact quota/access can change
+  independently.
+- **Next review:** after Gemini quota resets or billing is enabled in AI Studio,
+  verify one controlled live Ask and repeat the four exact demo prompts and both
+  injection cases; preserve safe diagnostics server-side without exposing keys.
 
 ## R-006 — Exact model-context authorization proof
 
@@ -122,3 +144,24 @@ or deeper review. It does not certify the system as secure.
 - **GitHub CLI:** the `gh` executable is not installed. Git remote points to the
   expected origin; commit/push status must be read from Git and is not inferred
   from local state.
+
+## Plus / Sol 6 handoff
+
+- Apply a premium visual direction with refined typography, spacing, and
+  brand-specific details while retaining the current role/context model and
+  accessible responsive behavior.
+- Add server-driven ingestion progress events for Uploading, Processing,
+  Embedding, Indexed, and Failed rather than the current combined in-progress
+  status; test PDF, image, and structured uploads end to end.
+- Measure ANN recall and SQL plans under representative role filters; keep the
+  ranking stage timing limitation in mind because it is currently inside the
+  database RPC duration.
+- Research semantic claim entailment and adversarial retrieved-document prompt
+  injection before claiming semantic grounding.
+- Repeat deep RLS/security review and evaluate hosted policy behavior only after
+  authenticating the Supabase CLI and identifying the intended project.
+- Current palette to preserve or deliberately revise: light canvas `#f7f9fc`,
+  white surfaces, navy text `#0b1b39`, blue action `#1459d4`; dark canvas
+  `#0d131b`, dark surface `#151d27`, light text `#e8eef7`, blue action
+  `#8cb6ff`; success, warning, and error states use green, amber, and red
+  semantic tokens in both themes.

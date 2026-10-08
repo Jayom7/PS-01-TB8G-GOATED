@@ -3,6 +3,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseConfig } from "./env";
 
 export async function updateSession(request: NextRequest) {
+  // Public sign-in renders immediately even when Auth cannot be reached.
+  // Protected pages still require verified claims.
+  if (request.nextUrl.pathname === "/login") return NextResponse.next({ request });
   const { url, publishableKey } = getSupabaseConfig();
   let response = NextResponse.next({ request });
 

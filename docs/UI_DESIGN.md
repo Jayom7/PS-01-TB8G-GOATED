@@ -1,47 +1,15 @@
-# Clearframe UI Direction
+# Clearframe UI Direction and Visual Audit
 
-## Product identity
+A quiet enterprise knowledge workspace: neutral light canvas, layered graphite dark surfaces, one restrained green accent, shared type/spacing/border/focus tokens, and six grouped destinations. App shell, source tables, forms, conversations, and inspectors share the same system. No decorative 3D, gradients, new UI framework, or copied product assets were introduced.
 
-Clearframe is a restrained security-oriented enterprise knowledge workspace.
-The application surface contains no university, hackathon, judge, or preview
-branding. Synthetic records are not presented as connected production data.
+Overview favors readable live counts and recent activity. Ask prioritizes the conversation, inline citations, composer, and optional within-page history. Evidence and detailed timings live in temporary drawers. Structured fields use business labels and formatted currency; originals preserve PDF page/OCR region. Sources uses dense searchable/filterable/sortable rows; mobile source actions remain visible. Ingest separates coordinated file and typed-record workflows with validation and truthful atomic indexing status. Security explains the boundary; Evaluation separates recorded synthetic observations from live runs and keeps failure states visible.
 
-## Concept
+Native modal drawers provide close button, Escape, outside click, focus trap/return, background inertness, scroll lock, internal scrolling, and full-width mobile layout. Mobile navigation traps/restores focus and makes background content inert. Closed mobile navigation is not keyboard reachable. Account selection/theme, outside click, and Escape close the menu. Reduced motion uses existing global preference handling.
 
-- [Clearframe Ask workspace](design/workspace-clearframe.png)
-- Earlier PS-01 concepts remain in `docs/design/` as historical references;
-  they contain branding and sample details that should not be copied.
+## Fresh visual boundary
 
-The Clearframe system uses a light or dark canvas, deep ink type, a restrained
-blue accent, cool separators, a slim top bar, a six-destination navigation
-rail, and a full-width Ask workspace. Citations are inline; source evidence
-opens in a temporary drawer rather than occupying a permanent column. Product
-UI, citations, controls, and text are implemented in code rather than shipped
-as a screenshot.
+Actual public login was inspected. All workspace routes were inspected on a separate explicitly labeled fixture server because live Supabase is unavailable. Desktop light/dark, mobile light/dark, and tablet layout checks found no page-level horizontal overflow; Evaluation tables retain a bounded horizontal scroller. All five role controls were exercised as UI controls, not live Auth/RLS verification. Conversation replay/new, source filters, record/PDF/image previews, OCR highlight, trace, drawers, and mobile navigation were inspected. Recorded Evaluation table data came from a historical local report and stayed labeled recorded.
 
-## Current implemented surface
+Fixed findings: drawer focus failed to return; Tab could escape the only drawer control; record title/location duplicated; amount fields showed raw minor units; late requests could reopen or contaminate a closed inspector; mobile source action was offscreen; refresh errors disappeared behind previous data; ingestion repeated its error message. Source sorting and partial-validation copy were added during the final bounded repair pass.
 
-- Supabase sign-in form and a server-side authenticated route gate.
-- Six direct routes: Dashboard, Ask, Sources, Ingest, Security, and Evaluation.
-- The account area at the bottom of the sidebar holds controlled local demo
-  role switching, theme selection, and Log out.
-- The Ask route shows inline citations and opens authorized source excerpts in
-  a responsive evidence drawer.
-- Dashboard, Ask, Sources, Ingest, Security, and Evaluation are real API-backed
-  views behind the authenticated workspace. Sources supports authorized text
-  search and source-type filters; rows show date, type, and available chunk
-  count.
-- Light/dark colors now resolve through a shared token set in
-  `apps/web/src/app/globals.css`. The themes use neutral surfaces, shared text,
-  border, accent, focus, status, overlay, and shadow tokens. Routes share a
-  full-height sidebar and independently scrolling main column; mobile nav and
-  the source drawer have narrow-screen layouts.
-- CSS and production build pass in the current pass. Prior browser checks
-  covered desktop/tablet/mobile and theme states; they are historical and were
-  not repeated because local Supabase is currently inaccessible. See
-  `REVIEW_NEEDED.md` for exact current verification boundaries.
-- Gemini errors are readable and retryable; quota availability remains
-  unverified. Security/Evaluation labels distinguish architecture and local
-  smoke measurements from hosted or production proof.
-
-The controlled local demo identity switch uses real seeded Supabase sessions.
+[Desktop Ask fixture](design/final-desktop-ask-fixture.jpg) and [mobile evidence fixture](design/final-mobile-evidence-fixture.jpg) are layout evidence only. Browser tests did not validate live role switching, provider answers, persistent history, upload completion, or database policy execution.

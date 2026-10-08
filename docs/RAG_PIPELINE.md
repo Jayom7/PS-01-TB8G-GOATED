@@ -1,79 +1,27 @@
 # RAG Pipeline
 
-## Ingestion
+## Ingestion and origin
 
-- PDF text is extracted by page; scanned pages are rendered and sent through
-  the local OCR adapter with page/image/region provenance.
-- PNG/JPEG upload validates signature and header dimensions before OCR; the
-  image pixel-area cap is 16 million pixels. This protects the local OCR path
-  from oversized rasters; it does not validate all image-decoder behaviors.
-- Structured records serialize deterministically into source chunks with table
-  and row provenance.
-- All source types persist through the common `documents`, `knowledge_chunks`,
-  and `access_grants` model. CEO-only local upload uses a separate server-side
-  privileged writer. Originals are private local files. There is no background
-  ingestion-job progress API.
-- Prior local PDF, scanned-page OCR, image OCR, structured ingestion, and source
-  preview checks are recorded in `REVIEW_NEEDED.md`; the OCR engine has not been rerun in Phase 1. The running local database and
-  five-role authorization boundaries have been freshly checked.
+PDF extraction preserves pages; scanned PDFs use bounded local OCR. PNG/JPEG inputs must pass signature, header and actual decode checks before OCR. Limits are 25 MB, 100 PDF pages, 16 million decoded pixels, and 1,000 OCR regions per image. These bound demo parser inputs; they do not establish production sandboxing.
 
-## Query and retrieval
+Structured ingestion whitelists seven tables and matching business keys, persists a typed row under server-assigned tenant/source IDs, rereads its fields, then renders canonical index text. Invoice overdue status is computed from due date, unpaid status, and the row's explicit `status_as_of` snapshot—not the wall clock. Seed JSON is never the final database origin story.
 
-1. Validate the Supabase bearer session; derive identity from trusted Auth
-   results. Demo role context is separately resolved by the local server-side
-   broker and restricted to the five seeded roles.
-2. Embed with configurable Gemini Embedding 2 (default 1536 dimensions).
-3. Call the `SECURITY INVOKER` hybrid retrieval RPC with the caller's session.
-   PostgreSQL applies RLS/ACL during candidate selection; SQL combines vector
-   and full-text ranks. No privileged broad fetch followed by Python filtering
-   is used by the ordinary query path.
-4. If no authorized chunks return, respond `INSUFFICIENT_EVIDENCE` without
-   calling generation. Otherwise bound the exact evidence context to 32,000
-   characters. The database RPC performs ranking; API timing combines retrieval
-   and ranking because no separate rank duration is exposed.
-5. Pass only that bounded authorized context to the generation adapter.
+## Query
 
-The database has HNSW and GIN indexes. Historical local evaluations are small
-synthetic smoke tests. Selective-filter recall, exact fallback behavior,
-representative query plans, hosted RLS, and production performance remain
-unverified; see `REVIEW_NEEDED.md`.
+1. Verify Auth and resolve the requested local demo context server-side.
+2. Embed once; retrieve once with the caller/broker token through invoker RPC/RLS.
+3. Issue canonical passage IDs only for located, returned evidence, with a 16,000-character content budget.
+4. If no usable authorized passages exist, return `INSUFFICIENT_EVIDENCE` without generation.
+5. Gemini selects `evidence_ids` only. Model-supplied text and quotes are rejected.
+6. Resolve every selected ID to backend-owned excerpts and page/row/region citations. Reject unknown/mixed IDs, missing references, and bounded paid/unpaid conflicts for the same record or explicit invoice ID across modalities.
+7. Stream the final validated result and persist actor-scoped history. Persistence failure is visible and does not invalidate an otherwise valid answer.
 
-## Generation and citation validation
+`CITATION_VALIDATED` means accepted extractive provenance. It does not prove source truth, general contradiction detection, relevance, or semantic entailment. Partial validation displays only accepted excerpts. Retrieved documents are untrusted data; the model has no execution tools. Live injection resilience remains unverified.
 
-The prompt treats retrieved text as untrusted data. The model must return a
-claim, citation IDs, and an exact short supporting quote for each cited
-passage. The deterministic validator checks IDs against the exact context,
-every quote's inclusion after whitespace normalization with word boundaries,
-a bounded paid/unpaid contradiction guard, a 0.35 token-overlap threshold
-after stop-word removal, and the existence of source-specific citation
-locations. The public response contains only claim text and citations rebuilt
-from retrieved rows.
+## Provider and evaluation
 
-These checks can reject forged IDs, missing quotes, unrelated quote/claim
-pairs, and missing provenance. They can also reject reasonable paraphrases.
-They do not prove entailment, detect all contradictions, or replace a semantic
-grounding evaluation. `CITATION_VALIDATED` now means the implemented
-deterministic checks passed, not that semantic truth is verified.
+Generation: configurable Gemini 3.8 Flash primary and 3.7 Flash fallback; embeddings: Gemini Embedding 2 / 1536 dimensions. One fallback is allowed for transport/timeouts and transient 500/502/503/504. HTTP 429 and malformed responses stop. No second embedding/retrieval is performed for fallback.
 
-## Provider behavior
+[Official 3.8 Flash documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash) and [structured-output documentation](https://ai.google.dev/gemini-api/docs/structured-output) were inspected. Model inventory is verified, but the current generation attempt failed with HTTP 503; no fastest-working model or successful latency benchmark is established.
 
-- Generation defaults: Gemini 3.8 Flash primary, 3.7 Flash fallback; settings
-  remain configurable. Embedding defaults to Gemini Embedding 2 at 1536 dims.
-- Timeout/transport/transient 5xx may try the configured fallback once. HTTP
-  429 does not retry another model. Safe errors carry a provider code; secrets,
-  prompts, and source content are not returned in user-facing error messages.
-- The Dashboard reports whether Gemini is configured, not whether it is
-  available. Historical live generation attempts returned 429; do not claim a
-  fresh successful response until one is checked after quota/access recovers.
-
-## Evaluation
-
-The local suite measures positive-query hit rate, rank, source modality, checked forbidden
-source hits, retrieved citation-location presence, and latency; it
-does not score semantic answer quality. Previous six-case local results
-(hit rate@12 1.0, MRR 0.775, zero forbidden hits in the checked cases,
-39 retrieved rows with citation ID/location present) are historical, small, and synthetic—not a representative
-benchmark. Legacy result labels are corrected on read without modifying saved files or
-claiming a rerun. Fresh runs use schema version 2; location presence does not
-prove generated-answer provenance or entailment. The fresh security suite is
-separate from these small retrieval metrics.
+Evaluation reports hit rate@12 (any expected source), MRR, checked forbidden hits, citation-location presence, modality observations, and measured retrieval latency. It does not compute conventional recall or score semantic answers. Reads label saved results as recorded; refresh never claims a rerun. Full result access and runs require the CEO local context.

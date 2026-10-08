@@ -1,3 +1,5 @@
+> Historical record. Current implementation and verification: [FINAL_BUILD_REPORT.md](FINAL_BUILD_REPORT.md) and [REVIEW_NEEDED.md](REVIEW_NEEDED.md). The current manifest again contains 19 sources; older six-source notes do not describe this pass.
+
 # Phase 1 verification — 2026-10-08
 
 Historical record of local submission hardening on the existing Clearframe

@@ -1,45 +1,27 @@
 # API Contract
 
-Base path: `/api/v1`. Protected routes require a Supabase bearer session.
-FastAPI validates that session before workspace data access. Request schemas
-reject extra query fields, including caller-provided identity or evidence.
+Protected routes require verified Supabase bearer identity. Optional `X-Demo-Role` is resolved only by the local CEO broker; it is never authoritative by itself.
 
-## Current routes
+| Method / route | Behavior |
+|---|---|
+| GET /health | Liveness only |
+| GET /api/v1/workspace | Authorized sources/counts, identity/context, configuration labels |
+| GET /api/v1/security | Scope and in-process request trace; no live RLS certification |
+| GET /api/v1/sources | RLS-visible source metadata |
+| GET /api/v1/sources/{chunk_id} | Authorized canonical chunk/record fields |
+| GET /api/v1/sources/{document_id}/preview | First authorized source excerpt |
+| GET /api/v1/sources/{document_id}/original | Local private PDF/image bytes; document grant required |
+| POST /api/v1/chat/query | Query and optional conversation UUID; canonical final result |
+| POST /api/v1/chat/stream | Real progress events, then validated result or safe error |
+| GET /api/v1/conversations | Recent actor/org/current-role conversations, bounded to 200 turns |
+| GET /api/v1/conversations/{id} | Reauthorized/reconstructed turns |
+| DELETE /api/v1/conversations/{id} | Owner-scoped soft hide |
+| POST /api/v1/demo/switch | Local CEO context broker |
+| POST /api/v1/ingest/file | CEO/local file upload, max 25 MB |
+| POST /api/v1/ingest/structured | CEO/local typed row persistence and indexing |
+| GET /api/v1/evaluation | CEO/local recorded synthetic measurements |
+| POST /api/v1/evaluation/run | CEO/local actual retrieval suite |
 
-- `GET /health`: liveness only; no provider/database check.
-- `GET /api/v1/workspace`: authorized counts/source metadata and system
-  configuration labels. `Gemini configured` does not mean reachable.
-- `GET /api/v1/security`: current identity/context, effective-scope text, and
-  recent in-memory retrieval events. It does not independently count
-  unauthorized evidence or query hosted RLS state.
-- `GET /api/v1/sources`: session-scoped authorized sources.
-- `GET /api/v1/sources/{source_id}`: authorized excerpt lookup. Hidden/missing
-  rows are returned as not found.
-- `POST /api/v1/chat/query`: query embedding, authorized hybrid retrieval,
-  bounded generation context, and server-built citations.
-- `POST /api/v1/ingestion/upload` and `/api/v1/ingestion/structured`: local
-  CEO-gated write paths; require configured local demo support.
-- `GET /api/v1/evaluation` and `POST /api/v1/evaluation/run`: local synthetic
-  retrieval/authorization evaluation.
+Generation claims contain only evidence IDs. Public claims contain canonical text plus backend-built citations (chunk ID, evidence ID, document ID, modality, location, excerpt). States: `CITATION_VALIDATED`, `PARTIALLY_CITATION_VALIDATED`, or `INSUFFICIENT_EVIDENCE`. These are extractive provenance states, not semantic truth scores.
 
-## Query response and checks
-
-`state` is `CITATION_VALIDATED`, `PARTIALLY_CITATION_VALIDATED`, or
-`INSUFFICIENT_EVIDENCE`. Each factual claim is expected to contain citation IDs
-and `supporting_quotes` in generation output. The API checks each ID belongs to
-the exact bounded context, the quote occurs in that citation's content after
-whitespace normalization, a coarse lexical overlap threshold, and a usable
-source location. Only claim text and server-created citations are returned.
-These deterministic checks reject some obvious unsupported output; they do not
-prove semantic entailment.
-
-The successful query trace reports authenticated-session use, authorized
-evidence-item count, model/fallback, and timings. It deliberately has no
-numeric unauthorized-evidence counter because that quantity is not separately
-measured. Database ranking time is included in retrieval timing. Provider
-errors use safe API details; HTTP 429 is `provider_rate_limited` and does not
-trigger a second model request.
-
-The API also returns local dashboard state and evaluation measurements; see
-`REVIEW_NEEDED.md` for the exact historical verification boundary. Hosted
-Supabase behavior and current provider availability are unverified.
+SSE progress stages reflect access, search, evidence selection, generation, and validation. No raw generated answer delta is released. Provider failures use safe codes; 429 never falls back. The final trace reports measured timings, configured/used model, context count, and history-save outcome. Ranking-only duration remains null because ranking occurs in the RPC. History replay discards stored trace metadata and reports current source-access rebuilding with no model call or original timings.

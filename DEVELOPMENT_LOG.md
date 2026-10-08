@@ -199,3 +199,11 @@
 - Hosted Supabase remains untouched because the Supabase CLI has no access
   token. `gh` is unavailable. Do not infer hosted correctness or a GitHub push
   from local test results.
+
+## 2026-10-09 — Final scoped build and visual pass
+
+Preserved the existing Next.js/FastAPI/Supabase invoker architecture. Added backend-owned canonical evidence IDs, conservative extractive answers, cross-modal invoice conflict checks, typed relational origin, restrictive stale-record denial, protected originals, real operational SSE, and actor/org/context history with current-evidence replay. Restored the full 19-source synthetic manifest and added local startup/readiness tooling.
+
+The visual pass aligned the six-route shell, Ask/history/composer, source/trace drawers, structured fields, OCR original/overlay, source search/type/sort, ingestion validation, and recorded Evaluation states. Fixed focus return/trapping, mobile source actions, late-request races, duplicate labels/errors, and invisible refresh/run failures. Isolated labeled fixtures were used for protected-route visual checks; they were not live security/provider evidence.
+
+VERIFIED LOCALLY: 76 backend tests, Ruff check/format, ESLint, TypeScript, production build, shell syntax, actual extraction of 45 candidates (8 PDF, 30 OCR, 7 structured) from 19 sources, and public login rendering. BLOCKED: new SQL/43 pgTAP assertions, live Auth/RLS/typed/history persistence and full restart because Docker/local Supabase is unavailable. Gemini inventory returned HTTP 200 for configured model IDs; one bounded generation request/fallback ended HTTP 503. Hosted Supabase and general semantic entailment remain UNVERIFIED. See FINAL_BUILD_REPORT, SUBMISSION_MATRIX, REVIEW_NEEDED, and DEMO_RUNBOOK for current boundaries.

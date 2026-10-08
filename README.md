@@ -1,126 +1,60 @@
 # Clearframe — Secure Knowledge Workspace
 
-Clearframe is the product identity for PS-01: a workspace for answering
-questions from documents, images, and business records while keeping the
-requester's identity attached to retrieval.
+Clearframe implements PS-01, a secure multimodal RAG workspace for NovaCore Industries. PDF pages, OCR regions, and relational records share an authorized vector/metadata index. The five demo roles are CEO, Finance Manager, HR Manager, Sales Manager, and Engineer.
 
-Canonical GitHub repository: [Jayom7/PS-01-TB8G-GOATED](https://github.com/Jayom7/PS-01-TB8G-GOATED).
-The SSH remote was checked on 2026-10-08; the spelling without `01` was not accessible.
+Repository: [Jayom7/PS-01-TB8G-GOATED](https://github.com/Jayom7/PS-01-TB8G-GOATED). Existing SSH remote retained; no duplicate repository or hosted deployment.
 
-## Current implementation
+## Current evidence — 2026-10-09
 
-- Next.js sign-in and a Supabase-authenticated workspace with Dashboard, Ask,
-  Sources, Ingest, Security, and Evaluation views.
-- Authenticated FastAPI chat, source lookup, workspace/security status, and
-  evaluation results. Query evidence is retrieved with the user's token and
-  database RLS; the API sends only those returned chunks to Gemini.
-- Local demo identity switching uses the seeded role users and brokers a real role-scoped
-  Supabase Auth session server-side while preserving the signed-in CEO identity. It is enabled only for loopback Supabase and
-  the ignored `.local-demo-credentials.json` file.
-- CEO-only local ingestion accepts PDFs, images, and structured JSON, creates
-  Gemini embeddings, and persists documents/chunks and role grants. Original
-  uploads are stored privately under ignored `data/private/ingest/`.
-- Citation responses check model-context membership, exact supporting excerpts,
-  coarse lexical overlap, a bounded paid/unpaid contradiction guard, and source location.
-  Every quote must match its authorized passage; any unauthorized reference rejects the claim. These bounded deterministic
-  checks do not prove semantic claim entailment. Empty evidence returns
-  `INSUFFICIENT_EVIDENCE`.
-- Evaluation runs the local retrieval cases and reports positive-query hit rate, rank,
-  checked forbidden-source hits, retrieved citation-location presence, OCR, structured, cross-modal,
-  and latency results. Results are saved locally and exposed to authenticated
-  workspace users.
+**VERIFIED LOCALLY:** 76 backend tests, Ruff check/format, frontend ESLint, TypeScript, and production build. Real local extraction produced 45 candidates from 19 synthetic sources: 8 PDF chunks, 30 image OCR regions, and 7 structured fixture records. These are extraction counts, not freshly persisted database counts.
 
-The configured generation path is Gemini 3.8 Flash primary and Gemini 3.7 Flash
-fallback; Embedding 2 uses 1536 dimensions. Model IDs remain configurable.
-HTTP 429 stops after one request rather than spending a fallback request.
-Current local Docker/Supabase is running; both migrations are applied. The
-lockfile-pinned CLI was restored with `npm ci`, and API/web were rebuilt and
-restarted from this checkout. Fresh local pgTAP passed 24/24. Hosted Supabase
-remains unverified. The latest real Ask attempt reached authorized retrieval,
-but Gemini generation returned HTTP 503 after its fallback path; no fresh
-successful answer or HR refusal is claimed. See `docs/PHASE1_VERIFICATION.md`
-and `docs/REVIEW_NEEDED.md` for current evidence and limits.
+**BLOCKED:** Docker engine is unavailable; local Postgres at 54322 refuses connections. The new additive migration, 43-assertion pgTAP suite, five-role live database checks, and clean end-to-end restart are not verified. Gemini model inventory returned HTTP 200 for configured 3.8 Flash and 3.7 Flash IDs, but one bounded synthetic generation attempt ended in HTTP 503 after the single fallback. No fresh successful answer, HR refusal, or live injection outcome is claimed. Hosted Supabase is **UNVERIFIED**.
 
-## Local setup
+Browser checks covered actual public login plus a separate, explicitly labeled UI fixture server for all six workspace routes, both themes, desktop/tablet/mobile, role controls, history, and evidence overlays. Fixture screenshots establish layout and interactions only. Previous database/provider results are **RECORDED BUT NOT FRESH**.
 
-Copy `.env.example` to the repository root as `.env` and replace the server
-values. Copy `apps/web/.env.local.example` to `apps/web/.env.local`; that file
-contains only the public Supabase URL/key and API base URL. Both local files
-are ignored by Git. Never place `GEMINI_API_KEY` or `SUPABASE_SECRET_KEY` in a
-`NEXT_PUBLIC_` variable or the web env file.
+## Implementation
 
-First ensure Docker Desktop is running and accessible, and install the
-repo-pinned dependencies from both lockfiles:
+- Next.js 16 / Supabase Auth frontend; FastAPI verifies identity and forwards user or brokered demo-role sessions to the database.
+- `match_knowledge_chunks` remains `SECURITY INVOKER`. RLS filters candidates before model context; ordinary retrieval never uses the service key.
+- Seven typed business tables and owner-scoped query history are added by the new migration. Fixtures seed real rows; the seed rereads persisted rows before generating index text. Stale/deleted structured rows deny indexed evidence until reindexed.
+- Gemini selects evidence IDs only. The backend renders canonical excerpts and source locations; fabricated text/quotes never become evidence. This verifies extractive provenance, not general entailment or relevance.
+- Ask uses real operational SSE events and releases factual text only after validation. History replay reauthorizes and rebuilds answers from current evidence.
+- Protected originals require document access. PDF page, OCR region overlay, and database fields are available in the evidence inspector. Timings belong in Retrieval Trace.
+- CEO-only local ingestion handles PDF, PNG/JPEG, and typed records. Files are private; grants include the chosen role and CEO. No invented per-stage ingestion progress.
+
+## Setup and startup
+
+Install the existing lockfile dependencies once:
 
 ```sh
 npm ci
 pnpm --dir apps/web install --frozen-lockfile
-```
-
-Create the local API environment once if needed and install the optional
-ingestion dependencies:
-
-```sh
 python3 -m venv .venv
 .venv/bin/pip install -e 'apps/api[dev,ingestion]'
 ```
 
-Then start local Supabase and seed the demo users/data:
+Create ignored root `.env` from `.env.example` and configure the server-side Gemini key. Keep secrets out of `NEXT_PUBLIC_` variables. Start your existing Docker runtime, then:
 
 ```sh
-PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./node_modules/.bin/supabase start
-.venv/bin/python apps/api/scripts/seed_local_demo.py
-.venv/bin/python apps/api/scripts/configure_local_web.py
+./scripts/dev --seed
 ```
 
-Start the API and web app in separate terminals from the repository root:
+This starts local Supabase, applies additive local migrations without resetting data, configures ignored web public settings, seeds synthetic data, and launches API/web. Seeding can contact Gemini for embeddings. Later launches use `./scripts/dev` to reuse the seed. Supabase stays running when the launcher exits; it stops only the API/web processes it created.
 
-```sh
-.venv/bin/python apps/api/scripts/run_local_api.py
-pnpm --dir apps/web build
-pnpm --dir apps/web start --hostname 127.0.0.1 --port 3000
-```
+Open `http://localhost:3000/login`. Use the local CEO account in ignored, owner-readable `.local-demo-credentials.json`; never display or commit that file. The browser remains signed in as CEO while the API brokers another seeded role session for the selected access context. Both launchers refuse hosted Supabase URLs.
 
-Open `http://localhost:3000` consistently; the API CORS origin uses that name.
-The API launcher reads local Supabase CLI credentials, refuses remote URLs,
-and binds to `127.0.0.1`. Install optional PDF/OCR dependencies with
-`pip install -e 'apps/api[ingestion]'` from the repository root, or use the
-setup documented in [API setup](apps/api/README.md).
-
-Demo account passwords are generated on first seed and stored only in the
-ignored, owner-readable `.local-demo-credentials.json` file. Read that file
-locally when preparing the demo; do not paste its contents into chat or Git.
-Do not use these local identities for a hosted project. The role
-switcher preserves the signed-in CEO identity and resolves the selected context
-to a real role-scoped session on the server; it does not edit authorization
-with a client-side label.
-
-See [API setup](apps/api/README.md), [demo plan](docs/DEMO_PLAN.md),
-[implementation plan](docs/IMPLEMENTATION_PLAN.md), and
-[review items](docs/REVIEW_NEEDED.md) for setup details and remaining proof
-boundaries. Hosted migration, hosted RLS, hosted retrieval, and production
-ingestion remain unverified; see the review file before using beyond the local
-demo.
-
-## Fresh local verification
-
-With the local services running:
+## Verification
 
 ```sh
 .venv/bin/pytest apps/api/tests -q
 .venv/bin/ruff check apps/api/src apps/api/scripts apps/api/tests
 .venv/bin/ruff format --check apps/api/src apps/api/scripts apps/api/tests
-pnpm --dir apps/web lint
+(cd apps/web && ./node_modules/.bin/eslint)
 apps/web/node_modules/.bin/tsc --noEmit --incremental false -p apps/web/tsconfig.json
-PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./node_modules/.bin/supabase test db
-.venv/bin/python apps/api/scripts/run_local_demo.py
+(cd apps/web && ./node_modules/.bin/next build --webpack)
+./scripts/verify_demo
 ```
 
-The final command verifies the running API without spawning another server or
-reseeding. It refuses hosted API URLs and checks the synthetic corpus boundary
-before real Gemini generation. Use `--skip-generation` for local-only checks;
-that intentionally returns exit code 2 (incomplete), not success. Exit code 1
-means failed checks; 0 means every required check passed. Timestamped reports
-and the latest report live under ignored `data/local/security-verification*.json`.
-No password or token is saved in those reports. Provider failure does not
-replace historical evaluation results with invented values.
+`verify_demo` checks service reachability, local Auth, typed tables/seed, history schema, pgTAP, then five-role retrieval/source checks and one bounded real generation flow. `--skip-generation` intentionally reports incomplete verification. Reports stay under ignored `data/local/`; failed checks never become successful metrics.
+
+See [submission matrix](docs/SUBMISSION_MATRIX.md), [demo runbook](docs/DEMO_RUNBOOK.md), [final report](docs/FINAL_BUILD_REPORT.md), and [review boundaries](docs/REVIEW_NEEDED.md).

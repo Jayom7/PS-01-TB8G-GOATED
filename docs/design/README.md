@@ -1,7 +1,3 @@
-# Design references
+# Design and browser references
 
-The screenshots in this directory are visual mockups, not captures from a
-live customer account. Names and Acme invoice, contract, date, and amount details
-inside the product UI are illustrative examples; they are not production or
-user data and are not evidence of current application behavior. Institution
-and project labels are presentation context.
+Older `workspace-*.png` files are visual concepts. `final-desktop-ask-fixture.jpg` and `final-mobile-evidence-fixture.jpg` are fresh browser captures from an isolated, explicitly labeled synthetic UI fixture server on 2026-10-09. They verify layout and interactions, not live authentication, retrieval, generated answers, or database security. No customer data appears in these assets.

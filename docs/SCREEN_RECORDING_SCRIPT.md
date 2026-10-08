@@ -44,5 +44,5 @@
 
 Describe local test evidence as local and historical when not rerun. The
 security trace does not count unauthorized evidence; pgTAP evidence does not
-prove hosted policies. Quote/lexical citation checks do not establish semantic
+prove hosted policies. Canonical evidence-ID selection does not establish general semantic
 entailment. Never call the app production-ready.

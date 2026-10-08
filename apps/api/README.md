@@ -8,6 +8,7 @@ workspace operations.
 - `GET /health` — liveness check.
 - `GET /api/v1/workspace` and `GET /api/v1/security` — current authenticated
   identity, role-scoped data counts, and recent request security traces.
+- `POST /api/v1/chat/stream` — real operational SSE events with validated final output.
 - `POST /api/v1/chat/query` — verifies the Supabase bearer session, embeds the
   question, calls `match_knowledge_chunks` with the same user token, and sends
   only RLS-returned evidence to Gemini. The request accepts a query, not a
@@ -16,7 +17,7 @@ workspace operations.
   `GET /api/v1/sources/{document_id}/preview` — list and open only
   documents/chunks visible to the signed-in user. Hidden and missing source
   rows share the same 404 response.
-- `GET /api/v1/evaluation` — authenticated read of current evaluation results;
+- `GET /api/v1/evaluation` — local CEO-context read of recorded evaluation results;
   `POST /api/v1/evaluation/run` is CEO-only and local-demo-only.
 - `POST /api/v1/demo/switch` — changes to a seeded role user's real Supabase
   Auth session. Available only for a loopback Supabase URL when the ignored
@@ -88,3 +89,5 @@ Reports are saved only under ignored `data/local/`; no credentials are printed.
 Evaluation schema 2 reports hit rate@12 over positive queries and retrieved
 citation-location presence, not Recall@12 or semantic answer provenance.
 Legacy saved files are relabeled as historical on read without being rerun.
+
+Current startup: `./scripts/dev --seed`. Readiness: `./scripts/verify_demo`. Typed-row origin, protected originals, and conversation endpoints are documented in [API_SPEC](../../docs/API_SPEC.md). Current proof and blockers: [FINAL_BUILD_REPORT](../../docs/FINAL_BUILD_REPORT.md).

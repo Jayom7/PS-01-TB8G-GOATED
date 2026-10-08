@@ -1,42 +1,20 @@
 # Data Model
 
-This describes the SQL in `supabase/migrations/20261008000100_secure_knowledge_index.sql`
-and `20261008000200_read_assigned_roles.sql`; it is not a claim that the
-migration is currently applied to a reachable or hosted database.
+The three migrations define 15 public application tables. The new `20261009000100_relational_evidence_history.sql` is additive and unapplied/unverified in this pass.
 
-## Tables and relationships
+| Boundary | Tables / relationships |
+|---|---|
+| Identity | organizations, profiles, roles, user_roles |
+| Unified evidence | documents, knowledge_chunks, access_grants |
+| Relational origin | customers, invoices, payments, purchase_orders, projects, employees, opportunities |
+| History | query_history: actor, org, active_role, conversation UUID, query, response, timestamps, deleted_at |
 
-- `organizations`: tenant boundary.
-- `profiles`: one row per Auth user, with organization and display name.
-- `roles` and `user_roles`: organization-scoped role assignments.
-- `documents`: source metadata, type, private storage path, content hash,
-  creator, and timestamps.
-- `knowledge_chunks`: document-derived text chunks with source type/name/id,
-  PDF page, structured row ID, image ID/OCR region, chunk index, metadata,
-  generated full-text vector, and 1536-dimensional embedding.
-- `access_grants`: read grants at exactly one document or chunk scope, for a
-  user, role, or organization principal.
+Business primary keys combine organization and business ID. Composite foreign keys bind sources to the same organization; invoices reference customers, payments reference invoices/customers, and purchase orders reference projects. Money uses nonnegative integer minor units; invoice status is paid/unpaid; dates use PostgreSQL date columns.
 
-The source types are `pdf`, `image_ocr`, and `structured`. Chunk citation IDs
-are UUIDs. Structured citations use table metadata plus `row_id`; PDF citations
-use `page_number`; image citations use `image_id` and optional `ocr_region`.
+All tables enable RLS. Typed rows inherit document grants; in this demo each structured source contains one business row. The `structured_records` union view uses `security_invoker=true`. Structured chunks additionally require an existing authorized origin row with identical canonical fields. Row edits/deletion therefore hide stale index representations until explicitly reindexed. There is no automatic reindex worker.
 
-## Authorization and retrieval
+Knowledge chunks preserve PDF page, structured table/row, or image/OCR region. PDF/OCR chunks support individual chunk grants as well as document grants. Structured typed evidence currently requires its origin document grant; chunk-only structured grants are intentionally insufficient for origin-row visibility. Originals always require document access.
 
-RLS is enabled for all seven tables. The `match_knowledge_chunks` RPC is
-`SECURITY INVOKER`, has a pinned empty search path, and returns hybrid semantic
-and keyword results under caller RLS. Indexes include HNSW vector search,
-GIN full-text, organization/source type, and access-grant lookup indexes. This
-documents migration contents; local test results and current runtime status are
-tracked separately in `REVIEW_NEEDED.md`.
+`match_knowledge_chunks` retains invoker security, pinned search path, HNSW cosine index, GIN full-text index, and hybrid ranking. The API performs no broad privileged retrieval followed by filtering.
 
-## Deliberate limitations
-
-The current migration uses a common document parent for all three source types;
-structured fields are normalized into chunk text/metadata rather than a
-separate business-table schema. Original bytes use private storage paths. ACL
-inheritance and content writes are implemented by the local ingestion path and
-must remain transactionally consistent. Production deletion/version lifecycle,
-representative query plans, selective-filter ANN recall, and hosted RLS remain
-review items. Do not add speculative schema or alter grant inheritance without
-checking the migration, seed code, and authorization tests together.
+History RLS requires Auth ownership and profile organization. The API additionally scopes active role. Response updates and hard delete are not granted to authenticated users; only `deleted_at` can be updated. Reopen independently reauthorizes evidence and reconstructs excerpts, including legacy/client-written rows.

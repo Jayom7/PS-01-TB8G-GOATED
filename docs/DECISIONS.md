@@ -63,3 +63,11 @@ storage and write-path review remains open.
 
 **Reason:** the needed components have explicit contracts and security
 boundaries; no orchestration framework is currently required.
+
+## D-006 — Backend-owned evidence
+
+The model selects canonical passage IDs only; it cannot author displayed claim text or canonical quotes. This closes the lexical quote-combination weakness without pretending that general entailment is solved. Same-record/explicit-invoice paid/unpaid conflicts are rejected conservatively.
+
+## D-007 — Relational record origin and history
+
+Typed demo tables satisfy the structured-database requirement. RLS-visible live rows must match structured index metadata, so stale/deleted representations fail closed. History belongs to the authenticated actor; role context is separate metadata and replay reauthorizes evidence. The additive migration still requires fresh local database verification.

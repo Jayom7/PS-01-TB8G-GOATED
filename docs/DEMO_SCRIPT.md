@@ -18,8 +18,8 @@ substitute a mock answer. The live Ask portion requires quota/access.
    Say Gemini is configured only; its availability is not implied.
 3. **Finance answer (45 sec).** In Ask, enter “What amount is shown on Acme's
    scanned invoice?” as Finance Manager. Open the citation and source drawer;
-   show the authorized excerpt and OCR location. Explain exact quote matching
-   and lexical overlap are checked, but semantic entailment is not proven.
+   show the authorized excerpt and OCR location. Explain that the server resolves selected evidence IDs to canonical excerpts;
+   semantic entailment and relevance are not independently verified.
 4. **Authorization denial (35 sec).** Keep the signed-in CEO identity
    unchanged, switch active context to HR Manager, and ask the same finance
    question. Show `INSUFFICIENT_EVIDENCE`; explain the role session is used by

@@ -18,7 +18,7 @@ API, API to database, normal query to privileged ingestion, and API to model.
 | Metadata/source-existence leak | Same policy on search, source lookup, counts, traces, errors | Denied title/ID/count/source-preview tests |
 | HNSW filtered search misses allowed evidence | Measure filtered recall; iterative scan/exact fallback if needed | Query plan and recall by ACL selectivity |
 | Malicious document prompt injection | Treat retrieved text as data; no tools; cite only evidence | Poisoned-document test and context inspection |
-| Model invents claim or citation | Current control validates citation IDs and provenance only; semantic support remains unverified | Invalid ID tests exist; entailment and prompt-injection evaluation remain |
+| Model invents claim or citation | Canonical evidence-ID selection renders source excerpts and rejects bounded payment conflicts; general semantic support remains unverified | Invalid ID tests exist; entailment and prompt-injection evaluation remain |
 | Unauthorized citation lookup | Re-authorize source endpoint under caller identity | Guessed source-ID tests |
 | Service-role key reaches browser/logs | Server-only config and secret scanning | Build/env inspection and repository scan |
 | Malicious upload/parser abuse | Type/size validation, isolated parser limits, bounded work | Invalid/oversize/corrupt fixture tests |

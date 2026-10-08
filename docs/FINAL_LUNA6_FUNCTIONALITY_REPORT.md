@@ -1,3 +1,5 @@
+> Historical record. Current implementation and verification: [FINAL_BUILD_REPORT.md](FINAL_BUILD_REPORT.md) and [REVIEW_NEEDED.md](REVIEW_NEEDED.md). The current manifest again contains 19 sources; older six-source notes do not describe this pass.
+
 # Current Luna 6 Functional Pass Report
 
 **Snapshot:** 2026-10-08. This is a bounded local implementation pass on the

@@ -66,51 +66,55 @@ or deeper review. It does not certify the system as secure.
   PaddleOCR was exercised on the synthetic invoice scan.
 - **Verified locally:** the seed pipeline indexed 19 sources, 45 chunks, and
   7 structured records; browser browsing and an authorized structured-source
-  excerpt work against the production build.
+  excerpt work against the production build. The production UI accepted a
+  synthetic PDF and reported one indexed chunk. Direct local API checks also
+  indexed a synthetic PDF, OCR image, and structured record; temporary rows,
+  private files, and synthetic artifacts were removed after verification.
 - **Not implemented:** background ingestion jobs. The local upload and
   service-key persistence paths have not been reviewed for hosted deployment.
-- **Current runtime check:** browser ingestion controls were disabled because
-  this API process did not have a local Supabase admin key. The CLI could not
-  read local container settings while the Docker daemon socket was unavailable;
-  no hosted admin credential was sent to the local database.
+- **Current runtime check:** Docker Desktop and local Supabase are running, and
+  the API reports ingestion ready. Browser PDF upload succeeded. The upload
+  control now clears its native file input after success so the same file can
+  be selected again; the browser file chooser did not permit a second image
+  selection during this pass. Image OCR and structured ingestion passed via
+  the local API. No hosted admin credential was sent to the local database.
 - **Progress detail:** the UI reports Ready, an in-progress combined upload /
   processing / embedding state, Indexed, and Failed. It does not yet receive
   exact server-side per-stage progress events.
-- **Next review:** start the local API with its local admin key, then exercise
-  browser-uploaded file/structured flows end to end and review source
-  provenance, write rollback, and access inheritance before any hosted
-  ingestion deployment.
+- **Next review:** recheck same-file selection in the browser after the input
+  reset fix. Review source provenance, write rollback, and access inheritance
+  before any hosted ingestion deployment.
 
 ## R-005 — Live provider and database connectivity
 
 - **Verified:** local Supabase Auth and API health/workspace/source requests
   work. Live Gemini embedding produced 1536 dimensions. Earlier, the production
   browser returned a CEO invoice answer with an OCR citation using 3.6 Flash,
-  and opening the citation returned the authorized excerpt. In the latest live
-  timing check, embedding and authorized retrieval succeeded, but Gemini
-  generation returned HTTP 429 on both configured chat models. Google AI Studio
-  showed 3.8 and 3.6 above the daily cap and 3.7 with one request remaining.
-  Chat configuration is now 3.7 primary and 3.8 fallback. Gemini 2.5 returned
-  HTTP 404 for this key despite unused quota shown in AI Studio. Generation
-  remains unverified after the model change because both configured 3.x models
-  returned HTTP 429 for this key.
+  and opening the citation returned the authorized excerpt. Current chat config
+  follows the requested `gemini-3.8-flash` primary and `gemini-3.7-flash`
+  conditional fallback. Live probes reached Gemini after successful embedding
+  and authorized retrieval, but both 3.8 and 3.7 returned HTTP 429; a 2.5
+  compatibility probe returned HTTP 404 and was removed from configuration.
+  The supplied AI Studio screenshot shows 3.8 and 3.6 above the displayed daily
+  cap and only one daily 3.7 request remaining. Generation is blocked by
+  current provider quota/access; do not describe a live answer as verified.
 - **Blocked:** hosted database migration and schema checks require Supabase CLI
   authentication or direct database credentials. Current API keys alone do
   not provide the CLI project token or database password.
 
 ## R-008 — Live Gemini answer reliability
 
-- **Implemented:** `gemini-3.7-flash` primary generation, one conditional
-  `gemini-3.8-flash` fallback attempt for transient failures, explicit fallback
+- **Implemented:** `gemini-3.8-flash` primary generation, one conditional
+  `gemini-3.7-flash` fallback attempt for transient failures, explicit fallback
   tracing, citation membership validation, and
   distinct safe messages for timeout, unavailable provider, and invalid model
   output.
-- **Observed:** earlier browser answer succeeded; the latest request reached
-  Gemini after successful embedding/retrieval but received HTTP 429. The 3.8
-  and 3.6 models exceeded their daily cap in AI Studio; 3.7 showed one request
-  remaining but returned HTTP 429 during live verification. 2.5 showed unused
-  quota but returned HTTP 404 for this key. Exact quota/access can change
-  independently.
+- **Observed:** an earlier browser answer succeeded using 3.6 Flash. In the
+  latest checks, embedding/retrieval succeeded but 3.8 and its 3.7 fallback
+  returned HTTP 429. The supplied AI Studio screenshot showed 3.8 and 3.6 above
+  their displayed daily caps and 3.7 with one request remaining. A 2.5 probe
+  returned HTTP 404 for this key and is not configured. Exact quota/access can
+  change independently.
 - **Next review:** after Gemini quota resets or billing is enabled in AI Studio,
   verify one controlled live Ask and repeat the four exact demo prompts and both
   injection cases; preserve safe diagnostics server-side without exposing keys.

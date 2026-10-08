@@ -13,7 +13,7 @@ from ps01_api.integrations import create_document_embedding, create_embedding, g
 def settings() -> Settings:
     return Settings(
         gemini_api_key=SecretStr("test-key"),
-        gemini_chat_model="gemini-3.7-flash",
+        gemini_chat_model="gemini-3.8-flash",
         gemini_embedding_model="gemini-embedding-2",
         embedding_dimensions=1536,
     )
@@ -64,7 +64,7 @@ async def test_generation_falls_back_after_transient_primary_model_outage() -> N
     async def handler(request: httpx.Request) -> httpx.Response:
         model = request.url.path.split("/")[-1].split(":")[0]
         calls.append(model)
-        if model == "gemini-3.7-flash":
+        if model == "gemini-3.8-flash":
             return httpx.Response(503)
         return httpx.Response(
             200,
@@ -72,13 +72,13 @@ async def test_generation_falls_back_after_transient_primary_model_outage() -> N
         )
 
     config = settings()
-    config.gemini_fallback_chat_model = "gemini-3.8-flash"
+    config.gemini_fallback_chat_model = "gemini-3.7-flash"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, config, "Return no claims.")
 
-    assert calls == ["gemini-3.7-flash", "gemini-3.8-flash"]
+    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash"]
     assert output["claims"] == []
-    assert output["_model"] == "gemini-3.8-flash"
+    assert output["_model"] == "gemini-3.7-flash"
     assert output["_fallback_used"] is True
 
 
@@ -89,7 +89,7 @@ async def test_generation_falls_back_when_primary_model_times_out() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         model = request.url.path.split("/")[-1].split(":")[0]
         calls.append(model)
-        if model == "gemini-3.7-flash":
+        if model == "gemini-3.8-flash":
             raise httpx.ReadTimeout("primary model timed out")
         return httpx.Response(
             200,
@@ -99,8 +99,8 @@ async def test_generation_falls_back_when_primary_model_times_out() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, settings(), "Return no claims.")
 
-    assert calls == ["gemini-3.7-flash", "gemini-3.8-flash"]
-    assert output["_model"] == "gemini-3.8-flash"
+    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash"]
+    assert output["_model"] == "gemini-3.7-flash"
     assert output["_fallback_used"] is True
 
 
@@ -112,7 +112,7 @@ async def test_generation_reports_provider_outage_after_trying_configured_fallba
         return httpx.Response(503)
 
     config = settings()
-    config.gemini_fallback_chat_model = "gemini-3.8-flash"
+    config.gemini_fallback_chat_model = "gemini-3.7-flash"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(IntegrationFailure) as failure:
             await generate_claims(client, config, "Generate a grounded answer.")

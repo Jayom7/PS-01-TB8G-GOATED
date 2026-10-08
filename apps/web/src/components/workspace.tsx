@@ -437,6 +437,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   async function uploadFile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!ingestFile) return;
+    const fileInput = event.currentTarget.querySelector<HTMLInputElement>('input[type="file"]');
     setPending(true);
     setError(null);
     setIngestResult(null);
@@ -458,6 +459,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response);
       setIngestResult(`${payload.source_name} indexed · ${payload.chunks_indexed} chunks`);
       setIngestFile(null);
+      if (fileInput) fileInput.value = "";
       await refreshWorkspace();
       setSources(null);
     } catch (cause) { setError(networkMessage(cause, "Ingestion failed. Your file is still selected; retry when the service is available.")); }

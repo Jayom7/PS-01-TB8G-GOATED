@@ -1,16 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, useReducer, useSyncExternalStore, type FormEvent } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Drawer } from "@/components/drawer";
 import { Icon, type IconName } from "@/components/icons";
 import { createClient } from "@/lib/supabase/client";
 import { sessionToken } from "@/lib/session";
-import { appendTurn, chatErrorMessage } from "@/lib/chat-state";
+import { initialIngestion, ingestionReducer, ingestionErrorMessage, type IngestionStatus } from "@/lib/ingestion-state";
+import { appendTurn, chatErrorMessage, groupCitations } from "@/lib/chat-state";
 
 export type View = "Dashboard" | "Ask" | "Sources" | "Ingest" | "Security" | "Evaluation";
 type Citation = {
+  document_id?: string | null;
   citation_id: string;
   source_type: string;
   title: string | null;
@@ -151,10 +153,12 @@ const exampleQuestions = [
 ];
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
-async function readResponse<T>(response: Response): Promise<T> {
+async function readResponse<T>(response: Response, operation?: "ingestion"): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const code = typeof body?.code === "string" ? body.code : "";
+    const ingestionMessage = operation === "ingestion" ? ingestionErrorMessage(body ?? {}, response.status) : null;
+    if (ingestionMessage) throw new Error(ingestionMessage);
     if (code.startsWith("provider_") || ["retrieval_unavailable", "evidence_changed"].includes(code)) throw new Error(chatErrorMessage(body, response.status));
     const message = response.status === 401
       ? "Your session expired. Sign in again to continue."
@@ -261,7 +265,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [structuredJson, setStructuredJson] = useState(JSON.stringify({ invoice_id: "INV-2049", customer_id: "CUST-ACM-1001", customer: "Acme Manufacturing", currency: "USD", total_minor_units: 120000, invoice_date: "2026-10-01", due_date: "2026-10-31", payment_status: "unpaid", status_as_of: "2026-10-09" }, null, 2));
   const [structuredMeta, setStructuredMeta] = useState({ table: "invoices", rowId: "INV-2049", sourceName: "Invoice INV-2049", accessRole: "CEO" });
   const [ingestFile, setIngestFile] = useState<File | null>(null);
-  const [ingestResult, setIngestResult] = useState<string | null>(null);
+  const [ingestion, dispatchIngestion] = useReducer(ingestionReducer, initialIngestion);
   const sourceRequest = useRef(0);
   const askInFlight = useRef(false);
   const navigationRef = useRef<HTMLElement>(null);
@@ -632,11 +636,9 @@ export default function Workspace({ identity, view }: { identity: string; view: 
 
   async function uploadFile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!ingestFile) return;
+    if (!ingestFile || ingestion.file.pending) return;
     const fileInput = event.currentTarget.querySelector<HTMLInputElement>('input[type="file"]');
-    setPending(true);
-    setError(null);
-    setIngestResult(null);
+    dispatchIngestion({ operation: "file", status: "start" });
     try {
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
@@ -652,21 +654,20 @@ export default function Workspace({ identity, view }: { identity: string; view: 
         body: ingestFile,
         signal: AbortSignal.timeout(180_000),
       });
-      const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response);
-      setIngestResult(`${payload.source_name} indexed · ${payload.chunks_indexed} chunks`);
+      const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response, "ingestion");
+      dispatchIngestion({ operation: "file", status: "success", message: `${payload.source_name} indexed · ${payload.chunks_indexed} chunks` });
       setIngestFile(null);
       if (fileInput) fileInput.value = "";
       await refreshWorkspace();
       setSources(null);
-    } catch (cause) { setError(networkMessage(cause, "Ingestion failed. Your file is still selected; retry when the service is available.")); }
-    finally { setPending(false); }
+    } catch (cause) { dispatchIngestion({ operation: "file", status: "failure", message: networkMessage(cause, "Ingestion failed. Your file is still selected; retry when the service is available.") }); }
+
   }
 
   async function ingestStructured(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPending(true);
-    setError(null);
-    setIngestResult(null);
+    if (ingestion.structured.pending) return;
+    dispatchIngestion({ operation: "structured", status: "start" });
     try {
       const fields = JSON.parse(structuredJson) as unknown;
       if (!fields || typeof fields !== "object" || Array.isArray(fields)) throw new Error("Fields must be a JSON object.");
@@ -678,15 +679,15 @@ export default function Workspace({ identity, view }: { identity: string; view: 
         body: JSON.stringify({ table: structuredMeta.table, row_id: structuredMeta.rowId, source_name: structuredMeta.sourceName, fields, access_role: structuredMeta.accessRole }),
         signal: AbortSignal.timeout(90_000),
       });
-      const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response);
-      setIngestResult(`${payload.source_name} indexed · ${payload.chunks_indexed} chunks`);
+      const payload = await readResponse<{ chunks_indexed: number; source_name: string }>(response, "ingestion");
+      dispatchIngestion({ operation: "structured", status: "success", message: `${payload.source_name} indexed · ${payload.chunks_indexed} chunks` });
       await refreshWorkspace();
       setSources(null);
     } catch (cause) {
-      setError(cause instanceof SyntaxError
+      dispatchIngestion({ operation: "structured", status: "failure", message: cause instanceof SyntaxError
         ? "Record fields must be valid JSON. Check quoted keys and commas, then retry."
-        : networkMessage(cause, "Structured record indexing failed. Check the fields and retry."));
-    } finally { setPending(false); }
+        : networkMessage(cause, "Structured record indexing failed. Check the fields and retry.") });
+    }
   }
 
   async function runSecurityChecks() {
@@ -796,7 +797,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
               <div className="account-popover">
                 {!workspace && error && <button type="button" className="text-button" onClick={() => void refreshWorkspace()}>Retry account access</button>}
                 <p className="account-current"><strong>Authenticated identity · {userName}</strong><span>{workspace?.identity.email ?? identity}</span><small>Active demo context · {role}</small></p>
-                {workspace?.demo_switch_available && <label className="field-label account-role-field">Switch demo role<select aria-label="Switch demo role" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending} onChange={(event) => void switchDemoUser(event.target.value)}>{DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}</select></label>}
+                {workspace?.demo_switch_available && <label className="field-label account-role-field">Switch demo role<select aria-label="Switch demo role" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending || ingestion.file.pending || ingestion.structured.pending} onChange={(event) => void switchDemoUser(event.target.value)}>{DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}</select></label>}
                 <button className="account-action" type="button" onClick={() => setSelectedTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "Use dark theme" : "Use light theme"}</button>
                 <button className="account-action account-logout" type="button" onClick={() => void signOut()}>Log out</button>
               </div>
@@ -844,8 +845,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
               setAccessRole={(accessRole) => setStructuredMeta((value) => ({ ...value, accessRole }))}
               file={ingestFile}
               setFile={setIngestFile}
-              result={ingestResult}
-              pending={pending}
+              fileStatus={ingestion.file}
+              structuredStatus={ingestion.structured}
               structuredMeta={structuredMeta}
               setStructuredMeta={(update) => setStructuredMeta((value) => ({ ...value, ...update }))}
               structuredJson={structuredJson}
@@ -917,7 +918,8 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
         <div className="question-bubble"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{turn.query}</p></div>
         {(turn.response.state === "SMALL_TALK" || turn.response.state === "CLARIFICATION_NEEDED") ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>{turn.response.state === "SMALL_TALK" ? "Conversation helper · no company-data lookup" : "Please clarify · no factual answer released"}</small></div></div> : turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className="answer-label">From your authorized sources</h2>
         {turn.response.state === "VERIFIED_EVIDENCE" && <p className="response-secondary">{turn.response.message}</p>}
-        {turn.response.claims.map((claim, index) => <p key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citation.citation_id}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citation.citation_id)}: ${citation.title ?? "Source"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citation.citation_id)}]</button>)}</p>)}
+        {turn.response.claims.map((claim, index) => <p key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citation.citation_id}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citation.citation_id)}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citation.citation_id)}]</button>)}</p>)}
+        <div className="answer-sources" role="region" aria-label="Answer sources" tabIndex={0}>{groupCitations(turn.response.claims.flatMap((claim) => claim.citations)).map((group) => group.citations.length === 1 ? <button className="inline-citation" key={group.key} type="button" aria-label={`Open evidence: ${group.title}`} onClick={(event) => onSource(group.citations[0], event.currentTarget)}>{group.title} · {formatLocation(group.citations[0].location)}</button> : <details className="citation-group" key={group.key}><summary>{group.title} · {group.citations.length} references</summary>{group.citations.map((citation) => <button className="text-button" key={`${citation.citation_id}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{formatLocation(citation.location)}</button>)}</details>)}</div>
         <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
         {turn.response.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Some selected evidence could not be validated. Only accepted excerpts are shown.</p>}
         {turn.response.trace.history_saved === false && <p className="response-secondary">This answer could not be saved to history.</p>}
@@ -965,8 +967,12 @@ function SourcesView({ sources, canDelete, onDelete, notice, filter, onFilter, t
   </div>;
 }
 
-function IngestView({ role, available, error, accessRole, setAccessRole, file, setFile, result, pending, structuredMeta, setStructuredMeta, structuredJson, setStructuredJson, onUpload, onStructured }: {
-  role: string; available: boolean; error: string | null; accessRole: string; setAccessRole: (role: string) => void; file: File | null; setFile: (file: File | null) => void; result: string | null; pending: boolean;
+function IngestionFeedback({ status }: { status: IngestionStatus }) {
+  return <>{status.error && <p className="request-error" role="alert">{status.error}</p>}{(status.pending || status.result) && <p role="status">{status.pending ? "Indexing this source…" : status.result}</p>}</>;
+}
+
+function IngestView({ role, available, error, accessRole, setAccessRole, file, setFile, fileStatus, structuredStatus, structuredMeta, setStructuredMeta, structuredJson, setStructuredJson, onUpload, onStructured }: {
+  role: string; available: boolean; error: string | null; accessRole: string; setAccessRole: (role: string) => void; file: File | null; setFile: (file: File | null) => void; fileStatus: IngestionStatus; structuredStatus: IngestionStatus;
   structuredMeta: { table: string; rowId: string; sourceName: string; accessRole: string }; setStructuredMeta: (update: Partial<{ table: string; rowId: string; sourceName: string; accessRole: string }>) => void;
   structuredJson: string; setStructuredJson: (value: string) => void; onUpload: (event: FormEvent<HTMLFormElement>) => void; onStructured: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -984,20 +990,19 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
     {!available && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>The local ingestion service is unavailable. Confirm the local API and Supabase are running.</span></div>}
     {available && role !== "CEO" && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>Ingestion is restricted to the CEO demo account. Your current role remains read-only.</span></div>}
     {error && <p className="request-error" role="alert">{error}</p>}
-    <div className={`ingest-progress ${error ? "ingest-failed" : result ? "ingest-indexed" : ""}`} role="status"><strong>{error ? "Failed" : result ? "Indexed" : role === "Loading" ? "Checking availability" : !available ? "Unavailable" : role !== "CEO" ? "Read-only" : pending ? "Indexing source…" : file ? "Ready to upload" : "Ready"}</strong><span>{error ? "Your selected file or record remains available to retry." : result ?? (pending ? "The API processes and indexes this source before returning; per-stage progress is not available." : "PDF, PNG, JPEG, or structured records can be indexed here.")}</span></div>
-    <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div>
-      <label className="file-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (canIngest && !pending) chooseFile(event.dataTransfer.files[0] ?? null); }}><input type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" disabled={!canIngest || pending} onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.currentTarget.value = ""; }} /><Icon name="files" size={20} /><strong>{file?.name ?? "Drop a file or choose a source"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : "PDF text and scanned pages, or image OCR · max 25 MB"}</span></label>
+    <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div><IngestionFeedback status={fileStatus} />
+      <label className="file-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (canIngest && !fileStatus.pending) chooseFile(event.dataTransfer.files[0] ?? null); }}><input type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" disabled={!canIngest || fileStatus.pending} onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.currentTarget.value = ""; }} /><Icon name="files" size={20} /><strong>{file?.name ?? "Drop a file or choose a source"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : "PDF text and scanned pages, or image OCR · max 25 MB"}</span></label>
       {fileError && <p className="request-error" role="alert">{fileError}</p>}
-      <label className="field-label">Grant source to<select value={accessRole} disabled={!canIngest || pending} onChange={(event) => setAccessRole(event.target.value)}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
-      <button className="primary-action" type="submit" disabled={!canIngest || pending || !file}>{pending ? "Uploading and indexing…" : "Upload and index"}</button>
+      <label className="field-label">Grant source to<select value={accessRole} disabled={!canIngest || fileStatus.pending} onChange={(event) => setAccessRole(event.target.value)}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
+      <button className="primary-action" type="submit" disabled={!canIngest || fileStatus.pending || !file}>{fileStatus.pending ? "Uploading and indexing…" : "Upload and index"}</button>
       <p className="form-footnote">Files are stored in the local private ingestion folder. Access is granted to the selected role and the CEO.</p>
     </form>
-    <form className="ingest-form" onSubmit={onStructured}><div className="form-title"><Icon name="table" size={18} /><div><h2>Structured record</h2><p>Save a relational row and index its authorized representation.</p></div></div>
-      <div className="field-pair"><label className="field-label">Table<select value={structuredMeta.table} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ table: event.target.value })} required>{["invoices", "customers", "payments", "purchase_orders", "projects", "employees", "opportunities"].map((table) => <option key={table}>{table}</option>)}</select></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>
-      <label className="field-label">Source name<input value={structuredMeta.sourceName} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ sourceName: event.target.value })} required /></label>
-      <label className="field-label">Record fields<textarea className="json-input" value={structuredJson} disabled={!canIngest || pending} onChange={(event) => setStructuredJson(event.target.value)} spellCheck={false} aria-describedby="structured-json-help" /></label><small className="field-hint" id="structured-json-help">JSON object with scalar values: strings, numbers, booleans, or null.</small>
-      <label className="field-label">Grant source to<select value={structuredMeta.accessRole} disabled={!canIngest || pending} onChange={(event) => setStructuredMeta({ accessRole: event.target.value })}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
-      <button className="primary-action" type="submit" disabled={!canIngest || pending}>{pending ? "Indexing record…" : "Index structured record"}</button>
+    <form className="ingest-form" onSubmit={onStructured}><div className="form-title"><Icon name="table" size={18} /><div><h2>Structured record</h2><p>Save a relational row and index its authorized representation.</p></div></div><IngestionFeedback status={structuredStatus} />
+      <div className="field-pair"><label className="field-label">Table<select value={structuredMeta.table} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ table: event.target.value })} required>{["invoices", "customers", "payments", "purchase_orders", "projects", "employees", "opportunities"].map((table) => <option key={table}>{table}</option>)}</select></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>
+      <label className="field-label">Source name<input value={structuredMeta.sourceName} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ sourceName: event.target.value })} required /></label>
+      <label className="field-label">Record fields<textarea className="json-input" value={structuredJson} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredJson(event.target.value)} spellCheck={false} aria-describedby="structured-json-help" /></label><small className="field-hint" id="structured-json-help">JSON object with scalar values: strings, numbers, booleans, or null.</small>
+      <label className="field-label">Grant source to<select value={structuredMeta.accessRole} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ accessRole: event.target.value })}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
+      <button className="primary-action" type="submit" disabled={!canIngest || structuredStatus.pending}>{structuredStatus.pending ? "Indexing record…" : "Index structured record"}</button>
     </form></div>
   </div>;
 }

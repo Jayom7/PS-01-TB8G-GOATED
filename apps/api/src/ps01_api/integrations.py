@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -71,47 +71,106 @@ async def create_document_embedding(
     )
 
 
-async def _create_embedding(
-    client: httpx.AsyncClient, settings: Settings, input_text: str
-) -> list[float]:
-    if not settings.gemini_api_key:
-        raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
+def provider_projects(settings):
+    """At most two operator-provisioned Gemini projects; same models and space."""
+    if settings.gemini_secondary_api_key:
+        if (
+            not settings.gemini_project_id
+            or not settings.gemini_secondary_project_id
+            or settings.gemini_project_id == settings.gemini_secondary_project_id
+            or settings.gemini_api_key == settings.gemini_secondary_api_key
+        ):
+            raise IntegrationFailure(
+                "Independent project configuration required", code="provider_invalid_request"
+            )
+    projects = [settings]
+    if settings.gemini_secondary_api_key:
+        projects.append(
+            settings.model_copy(
+                update={
+                    "gemini_api_key": settings.gemini_secondary_api_key,
+                    "gemini_project_id": settings.gemini_secondary_project_id,
+                    "gemini_secondary_api_key": None,
+                }
+            )
+        )
+    return projects
+
+
+def redundancy_eligible(failure):
+    return failure.code in {
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_unavailable",
+        "provider_authentication_failed",
+        "provider_invalid_model",
+    }
+
+
+async def _create_embedding(client, settings, input_text):
+    # One fixed model/dimension pair for both projects. No alternate space or
+    # model substitution is permitted against the existing index.
     if settings.embedding_dimensions != 1536:
-        raise IntegrationFailure(
-            "Gemini dimensions do not match the configured database schema",
-            code="provider_unavailable",
-        )
-    model = settings.gemini_embedding_model.removeprefix("models/")
-    response = await client.post(
-        f"{GEMINI_API_ROOT}/models/{model}:embedContent",
-        headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
-        json={
-            "model": f"models/{model}",
-            "content": {"parts": [{"text": input_text}]},
-            "embedContentConfig": {
-                "outputDimensionality": settings.embedding_dimensions,
-            },
-        },
-    )
-    if response.is_error:
-        raise provider_failure(response)
+        raise IntegrationFailure("Index dimension mismatch", code="provider_invalid_request")
+    last_failure = None
     try:
-        body = response.json()
-    except ValueError as exc:
-        raise IntegrationFailure(
-            "Gemini returned an invalid embedding response", code="provider_unavailable"
-        ) from exc
-    embedding = body.get("embedding")
-    values = embedding.get("values") if isinstance(embedding, dict) else None
-    if (
-        not isinstance(values, list)
-        or len(values) != settings.embedding_dimensions
-        or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values)
-    ):
-        raise IntegrationFailure(
-            "Gemini returned an invalid embedding", code="provider_unavailable"
-        )
-    return [float(value) for value in values]
+        async with asyncio.timeout(settings.generation_budget_seconds):
+            for project in provider_projects(settings):
+                if not project.gemini_api_key:
+                    last_failure = IntegrationFailure(
+                        "Gemini is not configured", code="provider_unavailable"
+                    )
+                    continue
+                model = project.gemini_embedding_model.removeprefix("models/")
+                circuit = _circuit(project, "embedding:" + model)
+                # Serialize requests per project so a failed chunk stops queued
+                # requests before they multiply quota failures. No text cache.
+                async with circuit.lock:
+                    if failure := _blocked(circuit):
+                        last_failure = failure
+                        continue
+                    try:
+                        response = await client.post(
+                            f"{GEMINI_API_ROOT}/models/{model}:embedContent",
+                            headers={"x-goog-api-key": project.gemini_api_key.get_secret_value()},
+                            json={
+                                "model": f"models/{model}",
+                                "content": {"parts": [{"text": input_text}]},
+                                "embedContentConfig": {
+                                    "outputDimensionality": project.embedding_dimensions
+                                },
+                            },
+                            timeout=httpx.Timeout(20.0, connect=5.0),
+                        )
+                        if response.is_error:
+                            raise provider_failure(response)
+                        body = response.json()
+                        values = body.get("embedding", {}).get("values")
+                        if (
+                            not isinstance(values, list)
+                            or len(values) != settings.embedding_dimensions
+                            or not all(type(v) in {int, float} and math.isfinite(v) for v in values)
+                        ):
+                            raise ValueError("Invalid vector")
+                    except (httpx.TransportError, TimeoutError) as exc:
+                        last_failure = _transport_failure(exc)
+                        _cool_down(circuit, last_failure)
+                        continue
+                    except IntegrationFailure as exc:
+                        _cool_down(circuit, exc)
+                        if not redundancy_eligible(exc):
+                            raise
+                        last_failure = exc
+                        continue
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        raise IntegrationFailure(
+                            "Invalid embedding response", code="provider_invalid_response"
+                        ) from exc
+                    circuit.failure, circuit.until = None, 0
+                    return [float(value) for value in values]
+    except TimeoutError as exc:
+        raise _transport_failure(exc) from exc
+    raise last_failure or IntegrationFailure("Embedding unavailable", code="provider_unavailable")
 
 
 async def retrieve_chunks(
@@ -161,6 +220,7 @@ class _Circuit:
     until: float = 0
     failure: IntegrationFailure | None = None
     in_flight: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # Metadata only, credential/provider/model scoped, per API worker. One in-flight
@@ -170,7 +230,7 @@ _GENERATION_CIRCUITS: dict[tuple[str, str], _Circuit] = {}
 
 def _circuit(settings, model):
     fingerprint = hashlib.sha256(settings.gemini_api_key.get_secret_value().encode()).hexdigest()
-    key = (fingerprint, model)
+    key = (settings.gemini_project_id or fingerprint, model)
     if key not in _GENERATION_CIRCUITS and len(_GENERATION_CIRCUITS) >= 512:
         expired = [
             k
@@ -233,8 +293,7 @@ async def generation_models(client, settings):
             circuit.in_flight = False
         if response.is_error:
             failure = provider_failure(response)
-            if response.status_code == 429 or response.status_code >= 500:
-                _cool_down(circuit, failure)
+            _cool_down(circuit, failure)
             raise failure
         try:
             available = {
@@ -311,8 +370,29 @@ async def generate_claims(client, settings, prompt, before_attempt=None, attempt
     attempts = []
     try:
         async with asyncio.timeout(settings.generation_budget_seconds):
-            return await _generate_bounded(
-                client, settings, prompt, before_attempt, attempts, attempt_observer
+            projects = provider_projects(settings)
+            last_failure = None
+            for project in projects:
+                if not project.gemini_api_key:
+                    continue
+                try:
+                    output = await _generate_bounded(
+                        client,
+                        project,
+                        prompt,
+                        before_attempt,
+                        attempts,
+                        attempt_observer,
+                        request_timeout=10.0 if len(projects) > 1 else 20.0,
+                    )
+                    output["_fallback_used"] |= project is not settings
+                    return output
+                except IntegrationFailure as exc:
+                    if not redundancy_eligible(exc):
+                        raise
+                    last_failure = exc
+            raise last_failure or IntegrationFailure(
+                "No eligible project", code="provider_unavailable"
             )
     except IntegrationFailure as exc:
         exc.model_attempts = attempts
@@ -324,7 +404,7 @@ async def generate_claims(client, settings, prompt, before_attempt=None, attempt
 
 
 async def _generate_bounded(
-    client, settings, prompt, before_attempt, attempts, attempt_observer=None
+    client, settings, prompt, before_attempt, attempts, attempt_observer=None, request_timeout=20.0
 ):
     shared = _circuit(settings, "shared-quota")
     if failure := _blocked(shared):
@@ -386,7 +466,15 @@ async def _generate_bounded(
         except BaseException:
             circuit.in_flight = False
             raise
-        attempt = {"model": model, "attempted": False}
+        attempt = {
+            "model": model,
+            "attempted": False,
+            "provider": "gemini",
+            "project": "secondary"
+            if settings.gemini_project_id
+            and settings.gemini_project_id == settings.gemini_secondary_project_id
+            else "primary",
+        }
         attempts.append(attempt)
         if attempt_observer:
             try:
@@ -403,7 +491,7 @@ async def _generate_bounded(
                     f"{GEMINI_API_ROOT}/models/{model}:generateContent",
                     headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
                     json=payload,
-                    timeout=httpx.Timeout(20.0, connect=5.0),
+                    timeout=httpx.Timeout(request_timeout, connect=5.0),
                 )
             except (httpx.TransportError, TimeoutError) as exc:
                 failure = _transport_failure(exc)
@@ -431,12 +519,7 @@ async def _generate_bounded(
                     or response.status_code >= 500
                     or (response.status_code == 429 and model_scoped_quota(response))
                 )
-                if (
-                    response.status_code == 429
-                    or response.status_code >= 500
-                    or response.status_code == 408
-                ):
-                    _cool_down(circuit, failure)
+                _cool_down(circuit, failure)
                 if response.status_code == 429 and not model_scoped_quota(response):
                     _cool_down(shared, failure)
                 last_failure = failure

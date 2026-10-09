@@ -636,3 +636,9 @@ svg { flex-shrink: 0; }
 .auth-link { display: inline-block; margin-top: 20px; color: var(--accent); font-size: 13px; text-underline-offset: 3px; }
 .auth-configuration, .auth-message { font-size: 13px; line-height: 1.6; color: var(--muted); }
 .auth-message { color: var(--ink); padding: 12px 0; }
+
+.citation-group { display: inline-block; vertical-align: top; margin-inline: 4px; max-width: 100%; }
+.citation-group summary { cursor: pointer; font-size: var(--type-ui); color: var(--accent); }
+.citation-group[open] { display: block; max-height: 180px; overflow-y: auto; }
+.citation-group .text-button { display: block; text-align: left; margin-block: 6px; }
+.answer-sources { max-height: 220px; overflow-y: auto; }

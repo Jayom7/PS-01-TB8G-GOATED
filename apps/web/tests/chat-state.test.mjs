@@ -22,3 +22,12 @@ test('a repeated terminal SSE result cannot duplicate a user turn', () => {
   assert.equal(appendTurn(first, turn), first);
   assert.equal(appendTurn(first, {...turn, response: {request_id: 'two'}}).length, 2);
 });
+
+test('original-source grouping retains distinct OCR citations and never merges duplicate titles', async () => {
+  const {groupCitations} = await import('../src/lib/chat-state.ts');
+  const first = {citation_id: 'chunk-1', document_id: 'doc-a', title: 'Invoice', location: {image_id: 'scan', region: {x_min: 1}}};
+  const second = {...first, citation_id: 'chunk-2', location: {image_id: 'scan', region: {x_min: 90}}};
+  const groups = groupCitations([first, second, first, {...first, document_id: 'doc-b'}]);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0].citations, [first, second]);
+});

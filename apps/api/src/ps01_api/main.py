@@ -851,6 +851,7 @@ async def _store_ingested(
     candidates,
     access_role: str,
     storage_path: str | None,
+    actor_token: str,
 ) -> dict[str, object]:
     if access_role not in DEMO_ROLES:
         raise HTTPException(status_code=422, detail="Choose one of the configured demo roles")
@@ -1021,6 +1022,51 @@ async def _store_ingested(
             f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
         )
         raise HTTPException(status_code=503, detail="Document access policy could not be saved")
+    # Confirm publication through the caller's RLS boundary, not just admin
+    # insert responses, before declaring either ingestion form successful.
+    try:
+        document = await _rest_rows(
+            client,
+            settings,
+            actor_token,
+            "documents",
+            params={
+                "id": f"eq.{source_id}",
+                "select": "id,content_hash",
+            },
+        )
+        indexed = await _rest_rows(
+            client,
+            settings,
+            actor_token,
+            "knowledge_chunks",
+            params={
+                "document_id": f"eq.{source_id}",
+                "select": "id",
+            },
+        )
+        if document.json() != [{"id": source_id, "content_hash": content_hash}] or len(
+            indexed.json()
+        ) != len(candidates):
+            raise IntegrationFailure("Publication readback failed", code="ingestion_unavailable")
+        if source_type == "structured":
+            typed = await _rest_rows(
+                client,
+                settings,
+                actor_token,
+                "structured_records",
+                params={
+                    "document_id": f"eq.{source_id}",
+                    "select": "row_id,fields",
+                },
+            )
+            if typed.json() != [{"row_id": candidates[0].row_id, "fields": fields}]:
+                raise IntegrationFailure("Typed readback failed", code="ingestion_unavailable")
+    except (IntegrationFailure, httpx.HTTPError, ValueError):
+        await client.delete(
+            f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
+        )
+        raise
     return {
         "document_id": source_id,
         "source_name": source_name,
@@ -1042,7 +1088,7 @@ async def ingest_file(
     if not _local_demo_enabled() or not settings.supabase_secret_key:
         raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as auth_client:
-        _, identity = await require_local_ceo(auth_client, authorization, demo_role)
+        actor_token, identity = await require_local_ceo(auth_client, authorization, demo_role)
     raw_name = unquote(source_name)
     safe_name = Path(raw_name.replace("\\", "/")).name
     if (
@@ -1094,6 +1140,7 @@ async def ingest_file(
                 candidates,
                 access_role,
                 str(stored_path.relative_to(REPOSITORY_ROOT)),
+                actor_token,
             )
     except HTTPException:
         stored_path.unlink(missing_ok=True)
@@ -1129,7 +1176,7 @@ async def ingest_structured(
     except IngestionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
-        _, identity = await require_local_ceo(client, authorization, demo_role)
+        actor_token, identity = await require_local_ceo(client, authorization, demo_role)
         result = await _store_ingested(
             client,
             settings,
@@ -1141,6 +1188,7 @@ async def ingest_structured(
             candidates,
             request.access_role,
             None,
+            actor_token,
         )
     return {"state": "indexed", **result}
 

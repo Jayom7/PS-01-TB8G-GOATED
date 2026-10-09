@@ -40,6 +40,8 @@ class EvidenceAudit:
                 "context_user_id": self.context_user_id,
                 "attempt_index": len(self.entries) + 1,
                 "model": attempt["model"],
+                "provider": attempt.get("provider", "gemini"),
+                "project": attempt.get("project", "primary"),
                 "provider_outcome": "pending",
                 "validation_outcome": "not_run",
                 "started_at": datetime.now(UTC).isoformat(),

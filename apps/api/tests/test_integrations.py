@@ -585,3 +585,166 @@ async def test_async_authorization_gate_does_not_allow_concurrent_model_storm():
         with pytest.raises(IntegrationFailure):
             await first
     assert len(calls) == 2
+
+
+def redundant_settings():
+    return settings().model_copy(
+        update={
+            "gemini_project_id": "operator-primary",
+            "gemini_secondary_project_id": "operator-backup",
+            "gemini_secondary_api_key": SecretStr("independent-backup-key"),
+        }
+    )
+
+
+async def test_independent_project_failover_rechecks_authorization_and_records_attempts():
+    from unittest.mock import AsyncMock
+
+    seen = []
+    gate = AsyncMock(return_value="same authorized question")
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        seen.append((request.headers["x-goog-api-key"], json.loads(request.content)))
+        if len(seen) == 1:
+            return httpx.Response(429)
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        output = await generate_claims(client, redundant_settings(), "original", gate)
+    assert gate.await_count == 2
+    assert len(seen) == 2 and seen[0][0] != seen[1][0]
+    assert seen[0][1]["contents"] == seen[1][1]["contents"]
+    assert output["_fallback_used"]
+    assert [a["project"] for a in output["_attempts"]] == ["primary", "secondary"]
+
+
+async def test_both_projects_exhausted_cool_down_without_repeating_requests():
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    async def handler(request):
+        calls.append(request.method)
+        return inventory() if request.method == "GET" else httpx.Response(429)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(2):
+            with pytest.raises(IntegrationFailure) as failure:
+                await generate_claims(client, redundant_settings(), "original")
+            assert failure.value.code == "provider_rate_limited"
+    assert calls.count("POST") == 2
+
+
+@pytest.mark.parametrize("same_project,same_key", [(True, False), (False, True)])
+async def test_redundancy_refuses_same_project_or_key_before_network(same_project, same_key):
+    from ps01_api.integrations import IntegrationFailure
+
+    config = redundant_settings()
+    if same_project:
+        config.gemini_secondary_project_id = config.gemini_project_id
+    if same_key:
+        config.gemini_secondary_api_key = config.gemini_api_key
+    calls = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: calls.append(r))
+    ) as client:
+        with pytest.raises(IntegrationFailure):
+            await generate_claims(client, config, "question")
+    assert not calls
+
+
+async def test_embedding_redundancy_preserves_exact_model_dimensions_and_input():
+    requests = []
+
+    async def handler(request):
+        requests.append((str(request.url), json.loads(request.content)))
+        return (
+            httpx.Response(429)
+            if len(requests) == 1
+            else httpx.Response(200, json={"embedding": {"values": [0.25] * 1536}})
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        vector = await create_embedding(client, redundant_settings(), "same query")
+    assert len(vector) == 1536
+    assert requests[0] == requests[1]
+
+
+async def test_embedding_outage_stops_repeated_chunk_requests():
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(3):
+            with pytest.raises(IntegrationFailure) as failure:
+                await create_embedding(client, settings(), "private text")
+            assert failure.value.code == "provider_rate_limited"
+    assert len(calls) == 1
+
+
+async def test_embedding_dimension_mismatch_is_rejected_without_network():
+    from ps01_api.integrations import IntegrationFailure
+
+    config = redundant_settings()
+    config.embedding_dimensions = 768
+    calls = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: calls.append(r))
+    ) as client:
+        with pytest.raises(IntegrationFailure):
+            await create_embedding(client, config, "query")
+    assert not calls
+
+
+async def test_project_fallback_stops_when_authorization_changes():
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    calls = []
+    gate = AsyncMock(side_effect=["authorized evidence", HTTPException(403, "Access changed")])
+
+    def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request)
+        return httpx.Response(429)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(HTTPException) as denied:
+            await generate_claims(client, redundant_settings(), "question", gate)
+    assert denied.value.status_code == 403
+    assert len(calls) == 1
+
+
+async def test_embedding_cooldown_recovers_with_a_bounded_probe():
+    import time
+
+    from ps01_api.integrations import IntegrationFailure, _circuit
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return (
+            httpx.Response(503)
+            if len(calls) == 1
+            else httpx.Response(200, json={"embedding": {"values": [0.25] * 1536}})
+        )
+
+    config = settings()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure):
+            await create_embedding(client, config, "first")
+        _circuit(config, "embedding:gemini-embedding-2").until = time.monotonic() - 1
+        assert len(await create_embedding(client, config, "retry")) == 1536
+    assert len(calls) == 2

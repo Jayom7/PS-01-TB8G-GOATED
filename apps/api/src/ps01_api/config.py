@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
+    # Optional, explicitly provisioned independent project. No key rotation.
+    gemini_project_id: str | None = None
+    gemini_secondary_project_id: str | None = None
+    gemini_secondary_api_key: SecretStr | None = None
     gemini_embedding_model: str = "gemini-embedding-2"
     embedding_dimensions: int = 1536
     gemini_chat_model: str = "gemini-3.8-flash"

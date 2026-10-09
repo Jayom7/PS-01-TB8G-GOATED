@@ -283,3 +283,53 @@ def test_malformed_history_content_fails_closed_without_crashing(saved):
     assert trace["history_replay"] is True
     assert trace["generation_model"] is None
     assert trace["timing_ms"] == {}
+
+
+def test_history_rebuilds_invoice_identity_from_current_authorized_siblings():
+    current = {
+        "id": ID,
+        "document_id": ID,
+        "source_id": "scan",
+        "source_name": "upload.png",
+        "source_type": "image_ocr",
+        "image_id": "scan",
+        "content": "Invoice total USD 1,234.00",
+    }
+    header = {
+        **current,
+        "id": "22222222-2222-4222-8222-222222222222",
+        "content": "Acme invoice CF-INV-1009",
+    }
+    stored = [
+        {
+            "query": "What is the Acme invoice CF-INV-1009 total?",
+            "response": {
+                "claims": [
+                    {
+                        "text": "untrusted saved text",
+                        "citations": [{"citation_id": ID, "evidence_id": ID + ":0"}],
+                    }
+                ]
+            },
+        }
+    ]
+    with (
+        patch("ps01_api.main._identity", AsyncMock(return_value=IDENTITY)),
+        patch("ps01_api.main._history_rows", AsyncMock(return_value=stored)),
+        patch(
+            "ps01_api.main._rest_rows",
+            AsyncMock(
+                side_effect=[
+                    httpx.Response(200, json=[current]),
+                    httpx.Response(200, json=[current, header]),
+                ]
+            ),
+        ) as reads,
+    ):
+        response = TestClient(app).get(f"/api/v1/conversations/{ID}", headers=HEADERS)
+    assert response.status_code == 200
+    result = response.json()["turns"][0]["response"]
+    assert result["state"] == "CITATION_VALIDATED"
+    assert result["claims"][0]["text"] == "The scanned source shows USD 1,234.00."
+    assert reads.await_args.kwargs["params"]["document_id"] == f"in.({ID})"
+    assert reads.await_args.args[2] == "actor-token"

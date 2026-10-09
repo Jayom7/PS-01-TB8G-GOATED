@@ -82,6 +82,11 @@ async def test_generation_falls_back_after_transient_primary_model_outage() -> N
     assert output["claims"] == []
     assert output["_model"] == "gemini-3.7-flash"
     assert output["_fallback_used"] is True
+    assert [attempt["provider_status"] for attempt in output["_attempts"]] == [503, 200]
+    assert [attempt["code"] for attempt in output["_attempts"]] == [
+        "provider_unavailable",
+        "success",
+    ]
 
 
 @pytest.mark.asyncio
@@ -239,6 +244,7 @@ async def test_model_scoped_quota_fallback_success_and_system_boundary():
         payload = json.loads(request.content)
         assert "Application policy" in payload["systemInstruction"]["parts"][0]["text"]
         assert payload["contents"][0]["parts"][0]["text"] == "Untrusted question"
+        assert payload["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
         if len(calls) == 1:
             return httpx.Response(
                 429,

@@ -144,6 +144,8 @@ async def integration_failure_handler(_request: Request, exc: IntegrationFailure
         content["retry_after_seconds"] = exc.retry_after
     if exc.provider_status:
         content["provider_status"] = exc.provider_status
+    if exc.model_attempts:
+        content["generation_attempts"] = exc.model_attempts
     statuses = {
         "provider_rate_limited": 429,
         "session_expired": 401,
@@ -1302,6 +1304,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             "evidence_items_sent_to_model": len(model_context),
             "generation_model": generation_model,
             "fallback_used": fallback_used,
+            "generation_attempts": model_output.get("_attempts", []) if generation_model else [],
             "active_role": active_role,
             "timing_ms": timings
             | {"total_ms": round((time.perf_counter() - request_started) * 1000, 1)},
@@ -1855,6 +1858,25 @@ async def conversation(
                     },
                 )
                 current = visible.json()
+                document_ids = list(dict.fromkeys(item["document_id"] for item in current))
+                if document_ids:
+                    # Rebuild same-document invoice identity from current,
+                    # independently RLS-visible siblings, never saved metadata.
+                    siblings = await _rest_rows(
+                        client,
+                        settings,
+                        scoped_token,
+                        "knowledge_chunks",
+                        params={
+                            "document_id": f"in.({','.join(document_ids)})",
+                            "select": (
+                                "id,content,source_name,source_type,source_id,document_id,metadata,"
+                                "page_number,row_id,image_id,ocr_region"
+                            ),
+                            "limit": "100",
+                        },
+                    )
+                    current += [item for item in siblings.json() if item["id"] not in ids]
             _, canonical = prepare_generation_context(
                 row["query"], [{**item, "chunk_id": item["id"]} for item in current]
             )

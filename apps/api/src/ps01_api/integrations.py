@@ -26,6 +26,7 @@ class IntegrationFailure(Exception):
         self.evidence: list[dict] = []
         self.timing_ms: dict[str, float | None] | None = None
         self.stage: str | None = None
+        self.model_attempts: list[dict] = []
 
 
 async def verify_supabase_session(
@@ -234,14 +235,20 @@ def model_scoped_quota(response):
 async def generate_claims(client, settings, prompt, before_attempt=None):
     if not settings.gemini_api_key:
         raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
+    attempts = []
     try:
         async with asyncio.timeout(settings.generation_budget_seconds):
-            return await _generate_bounded(client, settings, prompt, before_attempt)
+            return await _generate_bounded(client, settings, prompt, before_attempt, attempts)
+    except IntegrationFailure as exc:
+        exc.model_attempts = attempts
+        raise
     except TimeoutError as exc:
-        raise IntegrationFailure("Generation budget exceeded", code="provider_timeout") from exc
+        failure = IntegrationFailure("Generation budget exceeded", code="provider_timeout")
+        failure.model_attempts = attempts
+        raise failure from exc
 
 
-async def _generate_bounded(client, settings, prompt, before_attempt=None):
+async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
     models = await generation_models(client, settings)
     payload = {
         "systemInstruction": {"parts": [{"text": GENERATION_POLICY}]},
@@ -268,16 +275,32 @@ async def _generate_bounded(client, settings, prompt, before_attempt=None):
         },
     }
     for index, model in enumerate(models):
+        # Gemini 3 Flash defaults to medium thinking. This bounded selector
+        # resolves IDs rather than composing facts; low avoids spending the
+        # request deadline/token budget on unnecessary reasoning. Other model
+        # families keep their own supported defaults.
+        if model in {"gemini-3.8-flash", "gemini-3.7-flash"}:
+            payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
+        else:
+            payload["generationConfig"].pop("thinkingConfig", None)
         if before_attempt:
             payload["contents"][0]["parts"][0]["text"] = await before_attempt()
+        attempt = {"model": model}
+        attempts.append(attempt)
+        started = time.perf_counter()
         try:
             response = await client.post(
                 f"{GEMINI_API_ROOT}/models/{model}:generateContent",
                 headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
                 json=payload,
-                timeout=httpx.Timeout(12.0, connect=5.0),
+                timeout=httpx.Timeout(20.0, connect=5.0),
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
+            attempt["code"] = (
+                "provider_timeout"
+                if isinstance(exc, httpx.TimeoutException)
+                else "provider_unavailable"
+            )
             if index + 1 < len(models):
                 await asyncio.sleep(0.25)
                 continue
@@ -289,8 +312,12 @@ async def _generate_bounded(client, settings, prompt, before_attempt=None):
                     else "provider_unavailable"
                 ),
             ) from exc
+        finally:
+            attempt["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        attempt["provider_status"] = response.status_code
         if response.is_error:
             failure = provider_failure(response)
+            attempt["code"] = failure.code
             retryable = response.status_code in {404, 500, 502, 503, 504} or (
                 response.status_code == 429 and model_scoped_quota(response)
             )
@@ -314,5 +341,10 @@ async def _generate_bounded(client, settings, prompt, before_attempt=None):
             raise IntegrationFailure(
                 "Malformed structured output", code="provider_invalid_response"
             ) from exc
-        return output | {"_model": model, "_fallback_used": model != settings.gemini_chat_model}
+        attempt["code"] = "success"
+        return output | {
+            "_model": model,
+            "_fallback_used": model != settings.gemini_chat_model,
+            "_attempts": attempts,
+        }
     raise IntegrationFailure("No eligible model", code="provider_invalid_model")

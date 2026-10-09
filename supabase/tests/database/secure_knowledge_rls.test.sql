@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(51);
+select plan(55);
 
 select ok(
   (select count(*) = 7 and bool_and(relrowsecurity)
@@ -144,6 +144,12 @@ select is((select count(*) from public.query_history),1::bigint,'Owner can read 
 select is((select count(*) from public.match_knowledge_chunks(
   ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Acme invoice', 12
 )), 1::bigint, 'finance retrieval returns its authorized invoice');
+select is((select count(*) from public.match_knowledge_chunks(
+  ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Find invoice INV-2048', 12
+)), 1::bigint, 'Exact invoice query retains authorized matching evidence');
+select is((select count(*) from public.match_knowledge_chunks(
+  ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Find invoice INV-999999', 12
+)), 0::bigint, 'Unknown exact invoice never substitutes a similar invoice');
 select is((select count(*) from public.documents
   where id = '40000000-0000-4000-8000-000000000002'), 0::bigint,
   'finance user cannot discover the HR document by ID');
@@ -153,6 +159,9 @@ set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000002';
 select is((select count(*) from public.match_knowledge_chunks(
   ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Acme invoice', 12
 )), 0::bigint, 'HR retrieval returns zero finance evidence for the LLM context');
+select is((select count(*) from public.match_knowledge_chunks(
+  ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Find invoice INV-2048', 12
+)), 0::bigint, 'HR cannot discover exact finance invoice through identity lookup');
 select is((select count(*) from public.knowledge_chunks
   where id = '50000000-0000-4000-8000-000000000001'), 0::bigint,
   'HR cannot look up the finance citation by ID');
@@ -168,6 +177,9 @@ set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000003';
 select is((select count(*) from public.match_knowledge_chunks(
   ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Acme invoice', 12
 )), 1::bigint, 'user can retrieve a matching row in their own other organization');
+select is((select count(*) from public.match_knowledge_chunks(
+  ('[1,0,' || repeat('0,', 1533) || '0]')::extensions.vector, 'Find invoice INV-2048', 12
+)), 0::bigint, 'Exact invoice lookup cannot cross organization boundaries');
 select is((select count(*) from public.knowledge_chunks
   where id = '50000000-0000-4000-8000-000000000001'), 0::bigint,
   'same-role user in another organization cannot see the finance citation');

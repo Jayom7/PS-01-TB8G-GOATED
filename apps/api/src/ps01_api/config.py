@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1536
     gemini_chat_model: str = "gemini-3.8-flash"
     gemini_fallback_chat_model: str = "gemini-3.7-flash"
-    generation_budget_seconds: float = Field(default=32, ge=1, le=60)
+    generation_budget_seconds: float = Field(default=45, ge=1, le=60)
 
 
 @lru_cache

@@ -189,3 +189,67 @@ def test_authorized_literal_poison_inspection_is_explicitly_untrusted():
     )
     result = validate_generation(select("invoice:0"), evidence)
     assert result["claims"][0]["text"].startswith("Untrusted source text:")
+
+
+def test_contract_terms_answer_omits_masthead_and_preserves_canonical_excerpt():
+    text = (
+        "Example Services Contract Agreement ID: AGREEMENT-01 "
+        "Invoices are payable within thirty (30) calendar days of the invoice date."
+    )
+    _, evidence = prepare_generation_context(
+        "What payment terms are in the contract?",
+        [{**row(content=text), "source_type": "pdf", "page_number": 1}],
+    )
+    result = validate_generation(select("invoice:0"), evidence)
+    assert result["claims"][0]["text"] == (
+        "Invoices are payable within thirty (30) calendar days of the invoice date."
+    )
+    assert result["claims"][0]["citations"][0]["excerpt"] == text
+
+
+def test_combined_business_intents_accept_each_requested_fact_but_not_irrelevant_text():
+    from ps01_api.rag import relevant_passage
+
+    query = "Summarize Acme invoice amount, payment status and contract payment terms."
+    assert relevant_passage(query, row(content="Acme invoice total: USD 48,000.00"))
+    assert relevant_passage(query, row(content="Acme invoice is unpaid and overdue."))
+    assert relevant_passage(query, row(content="Acme contract payment terms: Net 30."))
+    assert not relevant_passage(query, row(content="Acme contract has a blue cover."))
+
+
+def test_invoice_identity_links_only_visible_siblings_of_one_document():
+    rows = [
+        row(
+            chunk_id="header",
+            document_id="scan",
+            source_type="image_ocr",
+            image_id="scan",
+            row_id=None,
+            source_name="upload.png",
+            content="Acme invoice CF-INV-1009",
+        ),
+        row(
+            chunk_id="amount",
+            document_id="scan",
+            source_type="image_ocr",
+            image_id="scan",
+            row_id=None,
+            source_name="upload.png",
+            content="Total: USD 1,234.00",
+        ),
+        row(
+            chunk_id="foreign",
+            document_id="other",
+            source_type="image_ocr",
+            image_id="other",
+            row_id=None,
+            source_name="other.png",
+            content="Total: USD 99,999.00",
+        ),
+    ]
+    _, evidence = prepare_generation_context("What is the Acme invoice CF-INV-1009 total?", rows)
+    assert validate_generation(select("amount:0"), evidence)["state"] == "CITATION_VALIDATED"
+    assert validate_generation(select("foreign:0"), evidence)["claims"] == []
+    rows[0]["content"] += " and invoice CF-INV-1010"
+    _, ambiguous = prepare_generation_context("What is the Acme invoice CF-INV-1009 total?", rows)
+    assert validate_generation(select("amount:0"), ambiguous)["claims"] == []

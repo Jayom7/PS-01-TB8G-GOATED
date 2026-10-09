@@ -26,7 +26,7 @@ SCAN = {
     "image_id": "scan",
     "source_id": "INV-1001",
     "content": "Invoice INV-1001 total USD 100.00",
-    "ocr_region": {"x_min": 1, "y_min": 2},
+    "ocr_region": {"x_min": 1, "y_min": 2, "x_max": 101, "y_max": 22},
 }
 # The extractor deliberately requires the explicit invoice-total wording used
 # by current canonical OCR. Identity can be in the current visible header.

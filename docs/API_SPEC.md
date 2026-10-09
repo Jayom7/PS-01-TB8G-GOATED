@@ -22,6 +22,7 @@ Protected routes require verified Supabase bearer identity. Optional `X-Demo-Rol
 | POST /api/v1/ingest/structured | CEO/local typed row persistence and indexing |
 | GET /api/v1/evaluation | CEO/local recorded synthetic measurements |
 | POST /api/v1/evaluation/run | CEO/local actual retrieval suite |
+| POST /api/v1/security/checks/run | CEO/local genuine Auth/RLS/API verifier; generation explicitly not run; passed/failed/unavailable states |
 
 Generation claims contain only evidence IDs. Public claims contain canonical text plus backend-built citations (chunk ID, evidence ID, document ID, modality, location, excerpt). States: `CITATION_VALIDATED`, `PARTIALLY_CITATION_VALIDATED`, `INSUFFICIENT_EVIDENCE`, explicitly labeled `SMALL_TALK`, `CLARIFICATION_NEEDED` (no factual claim), or `VERIFIED_EVIDENCE`. The latter is deterministic extraction after transient generation failure, with an explicit no-language-model message, null generation_model, response_mode=verified_evidence and provider_failure metadata. It is never live generation success. These are extractive provenance states, not semantic truth scores.
 

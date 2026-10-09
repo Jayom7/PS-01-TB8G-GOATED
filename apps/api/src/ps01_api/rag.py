@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -101,8 +102,9 @@ def literal_inspection(query):
 def relevant_passage(query, row):
     text = str(row.get("content", ""))
     if re.search(
-        r"ignore (?:all |previous |the )?instructions|reveal .*?(?:CEO|salar|secret)|"
-        r"system prompt|override .*?(?:policy|access)|you are now",
+        r"ignore\s+(?:(?:all|previous|the|prior)\s+){0,3}instructions|"
+        r"reveal[\s\S]{0,100}?(?:CEO|salar|secret)|system\s+prompt|"
+        r"override[\s\S]{0,100}?(?:policy|access)|you\s+are\s+now",
         text,
         re.I,
     ):
@@ -116,6 +118,8 @@ def relevant_passage(query, row):
         )
     )
     requested_ids = _invoice_keys({"content": query})
+    if requested_ids and len(_invoice_keys({"content": combined})) > 1:
+        return False
     if requested_ids and not requested_ids & _invoice_keys({"content": combined}):
         return False
     q = query.casefold()
@@ -233,6 +237,25 @@ def prepare_generation_context(
     Selection is probabilistic; the displayed assertion is extractive. No model
     quote or paraphrase is accepted as canonical source material.
     """
+    # RLS binds metadata.fields to a live typed row. Render those fields again
+    # here so stale/manipulated index prose cannot invent a typed-row amount.
+    canonical = []
+    for row in evidence:
+        metadata = row.get("metadata") or {}
+        if row.get("source_type") == "structured" and metadata.get("fields"):
+            from .ingestion import IngestionError
+            from .records import record_excerpt, validate_record
+
+            try:
+                validate_record(metadata.get("table"), row.get("row_id"), metadata["fields"])
+                row = {
+                    **row,
+                    "content": record_excerpt(metadata["table"], row["row_id"], metadata["fields"]),
+                }
+            except (IngestionError, TypeError, KeyError):
+                continue
+        canonical.append(row)
+    evidence = canonical
     selected = []
     document_text = {}
     for row in evidence:
@@ -318,6 +341,53 @@ def _invoice_keys(row: dict[str, Any]) -> set[str]:
     return {match.casefold() for match in re.findall(r"\b(?:[A-Z0-9]+-)?INV-\d+\b", value, re.I)}
 
 
+def conflicting_invoice_facts(rows):
+    """Bounded labelled totals/dates/customer checks; not semantic entailment."""
+    from decimal import Decimal
+
+    facts = {}
+    for row in rows:
+        keys = _invoice_keys(row)
+        if len(keys) != 1:
+            continue
+        values = facts.setdefault(next(iter(keys)), {})
+        text = str(row.get("content", ""))
+        amounts = re.findall(
+            r"(?:invoice\s+total\s*:?|\btotals|(?:^|[.\n])\s*amount\s*:)\s*"
+            r"(USD|INR|EUR|GBP|\$)\s*(\d[\d,]*(?:\.\d{1,2})?)",
+            text,
+            re.I,
+        )
+        for currency, amount in amounts:
+            values.setdefault("amount", set()).add(
+                (currency.upper().replace("$", "USD"), Decimal(amount.replace(",", "")))
+            )
+        for label in ("due date", "invoice date", "status as of"):
+            for date_value in re.findall(
+                rf"\b{label}\s*:?\s*(\d{{4}}-\d{{2}}-\d{{2}})", text, re.I
+            ):
+                values.setdefault(label, set()).add(date_value)
+        fields = (row.get("metadata") or {}).get("fields") or {}
+        if (row.get("metadata") or {}).get("table") == "invoices" and "total_minor_units" in fields:
+            values.setdefault("amount", set()).add(
+                (
+                    str(fields.get("currency", "")).upper(),
+                    Decimal(str(fields["total_minor_units"])) / 100,
+                )
+            )
+            for field, label in (
+                ("due_date", "due date"),
+                ("invoice_date", "invoice date"),
+                ("status_as_of", "status as of"),
+                ("customer", "customer"),
+            ):
+                if fields.get(field):
+                    values.setdefault(label, set()).add(str(fields[field]).casefold())
+        if any(len(value) > 1 for value in values.values()):
+            return True
+    return False
+
+
 def validate_generation(output: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
     """Resolve selected IDs to backend-owned excerpts, fail closed on forged output.
 
@@ -366,6 +436,7 @@ def validate_generation(output: dict[str, Any], evidence: list[dict[str, Any]]) 
         if (
             any(len(_payment_statuses(str(row["content"]))) > 1 for row in rows)
             or len(_payment_statuses(" ".join(str(item["content"]) for item in related))) > 1
+            or conflicting_invoice_facts(related)
         ):
             rejected = True
             continue
@@ -394,9 +465,20 @@ def validate_generation(output: dict[str, Any], evidence: list[dict[str, Any]]) 
 def citation_from_row(item: dict[str, Any]) -> dict[str, Any]:
     source_type = item.get("source_type")
     location: dict[str, Any] = {}
-    if source_type == "pdf" and isinstance(item.get("page_number"), int):
+    if source_type == "pdf" and type(item.get("page_number")) is int and item["page_number"] > 0:
         location = {"page": item["page_number"]}
-    elif source_type == "image_ocr" and item.get("image_id"):
+    elif (
+        source_type == "image_ocr"
+        and item.get("image_id")
+        and isinstance(item.get("ocr_region"), dict)
+        and all(
+            type(item["ocr_region"].get(key)) in {int, float}
+            and math.isfinite(item["ocr_region"][key])
+            for key in ("x_min", "y_min", "x_max", "y_max")
+        )
+        and item["ocr_region"]["x_max"] > item["ocr_region"]["x_min"] >= 0
+        and item["ocr_region"]["y_max"] > item["ocr_region"]["y_min"] >= 0
+    ):
         location = {"image_id": item["image_id"]}
         if isinstance(item.get("ocr_region"), dict):
             location["region"] = item["ocr_region"]

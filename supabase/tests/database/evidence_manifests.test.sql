@@ -1,0 +1,13 @@
+begin;
+create extension if not exists pgtap with schema extensions;
+select plan(8);
+select ok(not has_column_privilege('authenticated','public.security_events','details','SELECT'), 'manifest identities/hash are server-only');
+select ok(has_column_privilege('authenticated','public.security_events','outcome','SELECT'), 'existing actor audit metadata remains readable');
+select ok(not has_table_privilege('authenticated','public.security_events','INSERT'), 'browser cannot forge a manifest');
+select ok(not has_table_privilege('authenticated','public.security_events','UPDATE'), 'browser cannot rewrite a manifest');
+select ok(not has_table_privilege('anon','public.security_events','SELECT'), 'anonymous audit reads forbidden');
+select ok(has_column_privilege('service_role','public.security_events','details','INSERT'), 'server can persist manifest');
+select ok(has_column_privilege('service_role','public.security_events','details','UPDATE'), 'server can finish manifest');
+select ok((select relrowsecurity from pg_class where oid='public.security_events'::regclass), 'audit RLS retained');
+select * from finish();
+rollback;

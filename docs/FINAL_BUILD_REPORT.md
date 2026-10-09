@@ -1,5 +1,9 @@
 # Clearframe final implementation and acceptance report — 2026-10-09
 
+## Phase 2 — latest
+
+The [current master acceptance section](MASTER_ACCEPTANCE_CHECKLIST.md#phase-2--current-verified-implementation) supersedes the Phase 1 missing-seed/evaluation status below. Canonical purchase-order restoration retains deletion invalidation; corpus19/45/7. Durable per-attempt outbound IDs/hashes and server-only audit details are implemented. Typed canonicalization, conflicting totals/dates/customers and precise OCR locations are guarded. Actual persisted32-query run: hit@12=1.0, MRR0.815,0 authorization violations,249/249locations,32/32deterministic abstention decisions;7/7separate test-only adversaries. Live browser Security action:58PASS/0FAIL, generation not run. Exact timestamps, scoped tests and limitations are in the checklist. No fresh real generation, hosted operation or general frontend redesign performed; checkpoint Git status is reported in the delivery response.
+
 ## Phase 1 closeout — latest
 
 Source milestone `1bfac2657e3e4c94758ffc35b8ebfce569d91165` on main, starting05ca638, normally pushed through the existing origin. Exact final documentation HEAD/status follows in the delivery response. No Phase2 expansion or hosted/provider/auth-policy changes.

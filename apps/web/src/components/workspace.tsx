@@ -103,6 +103,7 @@ type SecurityData = {
   }[];
   security_tests: Record<string, string | number>;
 };
+type SecurityRun = { state: string; completed_at: string; scope: string; checks: { name: string; status: string; detail?: string }[] };
 type EvaluationData = {
   dataset: string;
   query_count: number;
@@ -118,6 +119,10 @@ type EvaluationData = {
   execution_origin?: string;
   duration_ms?: number;
   corpus?: Record<string, number>;
+  test_only_checks?: { passed: number; checked: number; scope: string };
+  test_only_results?: { name: string; hit: boolean; execution_scope: string }[];
+  citation_location_correctness?: { correct: number; checked: number };
+  abstention?: { passed: number; checked: number; basis: string };
   history?: { completed_at?: string; dataset?: string; query_count?: number; execution_origin?: string }[];
 };
 
@@ -242,6 +247,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [evaluation, setEvaluation] = useState<EvaluationData | null>(null);
   const [evaluationState, setEvaluationState] = useState("loading");
   const [evaluationRunning, setEvaluationRunning] = useState(false);
+  const [securityRun, setSecurityRun] = useState<SecurityRun | null>(null);
+  const [securityRunning, setSecurityRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -419,6 +426,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       setResult(null);
       setSources(null);
       setSecurity(null);
+      setSecurityRun(null);
       setEvaluation(null);
       setEvaluationState("loading");
       sourceRequest.current += 1;
@@ -681,6 +689,23 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     } finally { setPending(false); }
   }
 
+  async function runSecurityChecks() {
+    if (pending) return;
+    setPending(true);
+    setSecurityRunning(true);
+    setSecurityRun(null);
+    setError(null);
+    try {
+      const token = await currentToken();
+      if (!token) throw new Error("Your session expired. Sign in again to continue.");
+      const result = await readResponse<SecurityRun>(await authorizedFetch(`${API_BASE}/api/v1/security/checks/run`, {
+        method: "POST", headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
+      }));
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setSecurityRun(result);
+    } catch (cause) { setError(networkMessage(cause, "Live security checks are unavailable.")); }
+    finally { setPending(false); setSecurityRunning(false); }
+  }
+
   async function runEvaluation() {
     if (pending) return;
     setPending(true);
@@ -829,7 +854,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
               onStructured={ingestStructured}
             />
           ) : view === "Security" ? (
-            <SecurityView data={security} pending={pending} error={error} onRefresh={() => void loadSecurity()} />
+            <SecurityView data={security} pending={pending} error={error} onRefresh={() => void loadSecurity()} run={securityRun} running={securityRunning} onRun={() => void runSecurityChecks()} />
           ) : (
             <EvaluationView data={evaluation} state={evaluationState} running={evaluationRunning} pending={pending} error={error} role={role} onRefresh={() => void loadEvaluation()} onRun={() => void runEvaluation()} />
           )}
@@ -977,13 +1002,14 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
   </div>;
 }
 
-function SecurityView({ data, pending, error, onRefresh }: { data: SecurityData | null; pending: boolean; error: string | null; onRefresh: () => void }) {
+function SecurityView({ data, pending, error, onRefresh, run, running, onRun }: { data: SecurityData | null; pending: boolean; error: string | null; onRefresh: () => void; run: SecurityRun | null; running: boolean; onRun: () => void }) {
   if (!data) return <PageState title="Security" pending={pending} error={error} onRefresh={onRefresh} />;
   return <div className="data-page"><PageHeading title="Security" description="Authorization is enforced before information reaches the model." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh trace</button>} />
     {error && <p className="request-error" role="alert">{error}</p>}
     <ContextBand identity={data.identity.display_name} email={data.identity.email} role={data.active_role} verified />
     <section className="data-section"><SectionTitle title="Retrieval authorization boundary" /><div className="security-flow">{([{ label: "Identity", icon: "user", note: "Validated session" }, { label: "Authorization", icon: "lock", note: "Database policies" }, { label: "Secure retrieval", icon: "search", note: "Role-scoped matches" }, { label: "Authorized evidence", icon: "files", note: "Retrieved source rows" }, { label: "Generation", icon: "chat", note: "Answer generation" }] as const).map((step, index) => <div className={`security-step ${index === 1 ? "security-boundary" : ""}`} key={step.label}><Icon name={step.icon} size={19} /><strong>{step.label}</strong><span>{step.note}</span>{index < 4 && <Icon name="arrow" size={15} className="flow-arrow" />}</div>)}</div><p className="trace-disclaimer">Architectural design: retrieval uses the validated user or server-brokered demo-role session. Unauthorized evidence supplied to the model: not independently measured in this trace. The endpoint does not probe hosted RLS status.</p></section>
     <section className="data-section"><SectionTitle title="Effective access scope" /><p className="scope-copy"><Icon name="lock" size={15} />{data.effective_scope}</p><div className="security-checks">{Object.entries(data.security_tests).map(([label, value]) => <div key={label} className={label === "basis" ? "security-check-basis" : undefined} data-unverified={/not checked|not independently measured|not verified/.test(String(value)) || undefined}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></div>)}</div></section>
+    {data.active_role === "CEO" && <section className="data-section"><SectionTitle title="Live local security checks" /><p className="trace-disclaimer">Runs the existing verifier against local Auth, RLS and API routes. Generation is explicitly excluded.</p><button className="quiet-button" type="button" disabled={pending} onClick={onRun}>{running ? "Running live checks…" : "Run security checks"}</button><p role="status">{running ? "Checking local authorization…" : run ? `${run.state} · ${formatTime(run.completed_at)}` : "Not run in this session"}</p>{run && <details open={run.state !== "passed"}><summary>Inspect {run.checks.length} checks</summary><ol>{run.checks.map((check, index) => <li key={index}><strong>{check.status.replaceAll("_", " ")}</strong> · {check.name}{check.detail ? ` · ${check.detail}` : ""}</li>)}</ol></details>}</section>}
     <section className="data-section"><SectionTitle title="Recent security activity" /><ol className="trace-list security-activity-scroll" role="list" aria-label="Recent security activity" tabIndex={0}>{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count == null ? "Evidence count unmeasured for this action" : `${entry.authorized_evidence_count} authorized evidence items`} · unauthorized evidence supplied to the model: not independently measured</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question or inspect a source to record activity in this context.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Events persist in PostgreSQL and are visible only to the signed-in actor and current context. Unverified identities are not attributed to events.</p></section>
   </div>;
 }
@@ -994,8 +1020,10 @@ function EvaluationView({ data, state, running, pending, error, role, onRefresh,
       <div className="evaluation-scope"><p className="evaluation-run-label"><Icon name="chart" size={15} />{data.run_kind === "historical_legacy" ? "Historical saved run · legacy labels corrected; not rerun" : data.run_kind === "fresh_local" ? "Fresh local synthetic run" : "Recorded local synthetic run; not rerun on refresh"}</p><div className="evaluation-observations"><span>Checked authorization cases · {data.authorization_violations} forbidden hits</span><span>Retrieved citation locations · {String(data.measured_checks?.retrieved_citation_locations_present ?? "not measured")} / {String(data.measured_checks?.retrieved_citation_locations_checked ?? "not measured")} present</span><span>Mean latency · {formatLatency(data.measured_checks?.mean_latency_ms)}</span></div></div>
       <p className="empty-note">{data.execution_origin === "app" ? "Executed from the app" : "Loaded from a local CLI or legacy artifact; not an app-executed run"}{data.completed_at ? ` · ${formatTime(data.completed_at)}` : " · Run time was not recorded"}{typeof data.duration_ms === "number" ? ` · ${(data.duration_ms / 1000).toFixed(1)} seconds` : ""}. {data.corpus ? `Corpus at start: ${data.corpus.documents} sources, ${data.corpus.knowledge_chunks} chunks, ${data.corpus.structured_records} typed records.` : "Corpus size was not recorded for this historical run."}</p>
       <div className="evaluation-summary"><div><span>Dataset</span><strong>{data.dataset}</strong></div><div><span>Queries</span><strong>{data.query_count}</strong></div><div><span>Hit rate@{data.top_k}</span><strong>{formatMetric(data.retrieval_hit_rate_at_k)}</strong></div><div><span>Mean reciprocal rank</span><strong>{formatMetric(data.mean_reciprocal_rank)}</strong></div><div><span>Checked forbidden hits</span><strong className={data.authorization_violations ? "metric-bad" : "metric-good"}>{data.authorization_violations}</strong></div></div>
+      {data.citation_location_correctness && <p className="empty-note">Locations matched against current authorized database rows: {data.citation_location_correctness.correct} / {data.citation_location_correctness.checked}. Deterministic abstention decisions: {data.abstention?.passed} / {data.abstention?.checked}. These checks use all eligible passages with the server validator; no generated answers are scored.</p>}
+      {data.test_only_checks && <details><summary>Controlled adversarial checks: {data.test_only_checks.passed} / {data.test_only_checks.checked} passed · test only</summary><p className="empty-note">{data.test_only_checks.scope}. These mutations do not change database records or measure live model resistance.</p><ol>{data.test_only_results?.map((check) => <li key={check.name}>{check.hit ? "Pass" : "Failed"} · {check.name}</li>)}</ol></details>}
       <p className="empty-note">Generation-dependent checks are not run by this retrieval suite. A real Ask answer, its citations and live injection resistance require separate verification; provider outages can block those checks.</p>
-      <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong></td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
+      <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong>{typeof row.query === "string" && <p>{row.query}</p>}{typeof row.expected_behavior === "string" && <small>Expected: {row.expected_behavior} · deterministic validator: {row.abstention_pass === true ? "pass" : "review"}</small>}</td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
       <p className="trace-disclaimer">Retrieved with authenticated demo users against the local database. This small synthetic run measures retrieval and row-level authorization; hit rate means any expected source was found, not recall over all relevant sources. Citation-location presence does not verify answer provenance or entailment. It does not establish representative-scale quality or semantic answer quality.{data.completed_at ? ` Completed ${formatTime(data.completed_at)}.` : ""}</p>
       {!!data.history?.length && <details className="evaluation-history"><summary>Previous saved runs ({data.history.length})</summary><ol>{data.history.map((run, index) => <li key={`${run.completed_at}-${index}`}>{run.completed_at ? formatTime(run.completed_at) : "Run time not recorded"} · {run.dataset ?? "Historical dataset"} · {run.query_count ?? "Unrecorded"} queries · {run.execution_origin === "app" ? "App run" : "CLI or legacy artifact"}</li>)}</ol></details>}
       {error && <p className="request-error" role="alert">{error}</p>}

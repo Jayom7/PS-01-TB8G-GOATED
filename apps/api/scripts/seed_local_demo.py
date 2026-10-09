@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -257,6 +258,176 @@ async def embed_candidate(
     return await create_document_embedding(
         client, settings, candidate.source_name, candidate.content
     )
+
+
+async def restore_purchase_order() -> None:
+    """Restore only the canonical missing source, with NEW source/chunk identities.
+
+    Old deleted references stay invalid. Never reseed users, unrelated sources,
+    or existing business records. All prerequisites are checked before writing.
+    """
+    local = local_supabase_environment()
+    base, key = local["API_URL"].rstrip("/"), local["SERVICE_ROLE_KEY"]
+    source = next(
+        s
+        for s in json.loads(MANIFEST.read_text())["sources"]
+        if s["path"] == "structured/orders.json"
+    )
+    path = CORPUS / source["path"]
+    fixture = json.loads(path.read_text())
+    (fields,) = fixture["records"]
+    validate_record("purchase_orders", fields["order_id"], fields)
+    with httpx.Client(timeout=20) as client:
+        (org,) = request_rows(
+            client,
+            base,
+            key,
+            "organizations",
+            params={"name": "eq.NovaCore Industries", "select": "id"},
+        )
+        org_id = org["id"]
+        if request_rows(
+            client,
+            base,
+            key,
+            "documents",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "metadata->>local_demo_path": f"eq.{source['path']}",
+                "select": "id",
+            },
+        ):
+            print("Canonical purchase-order source already exists; no changes made.")
+            return
+        if request_rows(
+            client,
+            base,
+            key,
+            "purchase_orders",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "order_id": f"eq.{fields['order_id']}",
+            },
+        ):
+            raise RuntimeError("Existing purchase-order row has another origin; refusing overwrite")
+        roles = request_rows(
+            client,
+            base,
+            key,
+            "roles",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "select": "id,name",
+            },
+        )
+        role_ids = {r["name"]: r["id"] for r in roles}
+        if not set(source["allowed_roles"]).issubset(role_ids):
+            raise RuntimeError("Required canonical roles are missing")
+        (candidate,) = structured_record_candidates(
+            table_name="purchase_orders",
+            row_id=fields["order_id"],
+            source_name=f"purchase_orders / {fields['order_id']}",
+            fields=fields,
+            source_id=source["source_id"],
+        )
+        async with httpx.AsyncClient(timeout=35) as embedding_client:
+            vector = await embed_candidate(embedding_client, get_settings(), candidate)
+        (doc,) = write_rows(
+            client,
+            base,
+            key,
+            "documents",
+            [
+                {
+                    "organization_id": org_id,
+                    "source_type": "structured",
+                    "source_name": "Purchase Orders records",
+                    "content_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "metadata": {
+                        "table": "purchase_orders",
+                        "category": source["category"],
+                        "chunk_count": 1,
+                        "local_demo_path": source["path"],
+                        "synthetic": True,
+                    },
+                }
+            ],
+        )
+        try:
+            write_rows(
+                client,
+                base,
+                key,
+                "purchase_orders",
+                [
+                    {
+                        **fields,
+                        "organization_id": org_id,
+                        "document_id": doc["id"],
+                    }
+                ],
+            )
+            (persisted,) = request_rows(
+                client,
+                base,
+                key,
+                "structured_records",
+                params={
+                    "document_id": f"eq.{doc['id']}",
+                    "select": "fields",
+                },
+            )
+            if persisted["fields"] != fields:
+                raise RuntimeError("Canonical typed row did not round-trip exactly")
+            write_rows(
+                client,
+                base,
+                key,
+                "knowledge_chunks",
+                [
+                    {
+                        "organization_id": org_id,
+                        "document_id": doc["id"],
+                        "source_type": "structured",
+                        "source_name": candidate.source_name,
+                        "source_id": source["source_id"],
+                        "row_id": fields["order_id"],
+                        "chunk_index": 0,
+                        "content": record_excerpt("purchase_orders", fields["order_id"], fields),
+                        "metadata": {
+                            "table": "purchase_orders",
+                            "fields": fields,
+                            "category": source["category"],
+                        },
+                        "embedding": vector,
+                    }
+                ],
+            )
+            write_rows(
+                client,
+                base,
+                key,
+                "access_grants",
+                [
+                    {
+                        "organization_id": org_id,
+                        "document_id": doc["id"],
+                        "principal_type": "role",
+                        "principal_id": role_ids[role],
+                        "can_read": True,
+                    }
+                    for role in source["allowed_roles"]
+                ],
+            )
+        except Exception:
+            response = client.delete(
+                f"{base}/rest/v1/documents",
+                headers=rest_headers(key),
+                params={"id": f"eq.{doc['id']}"},
+            )
+            response.raise_for_status()
+            raise
+    print("Restored only structured/orders.json: new source identity, canonical row/chunk/grants.")
 
 
 async def main() -> None:
@@ -613,4 +784,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--restore-purchase-order", action="store_true")
+    args = parser.parse_args()
+    asyncio.run(restore_purchase_order() if args.restore_purchase_order else main())

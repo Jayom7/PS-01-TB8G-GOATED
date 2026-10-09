@@ -293,6 +293,7 @@ def test_history_rebuilds_invoice_identity_from_current_authorized_siblings():
         "source_name": "upload.png",
         "source_type": "image_ocr",
         "image_id": "scan",
+        "ocr_region": {"x_min": 0, "y_min": 0, "x_max": 100, "y_max": 20},
         "content": "Invoice total USD 1,234.00",
     }
     header = {

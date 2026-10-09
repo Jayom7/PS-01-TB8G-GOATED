@@ -51,7 +51,7 @@ class TestApiSecurity:
         }
         captured: list[str] = []
 
-        async def generate(_client, _settings, prompt, before_attempt=None):
+        async def generate(_client, _settings, prompt, before_attempt=None, attempt_observer=None):
             if before_attempt:
                 prompt = await before_attempt()
             captured.append(prompt)

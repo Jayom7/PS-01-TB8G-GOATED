@@ -23,6 +23,7 @@ API, API to database, normal query to privileged ingestion, and API to model.
 | Service-role key reaches browser/logs | Server-only config and secret scanning | Build/env inspection and repository scan |
 | Malicious upload/parser abuse | Type/size validation, isolated parser limits, bounded work | Invalid/oversize/corrupt fixture tests |
 | Audit trace exposes source content | Minimize stored fields and scope audit access | Trace redaction tests |
+| Retrieval candidates misrepresented as outbound evidence | Capture exact serialized payload IDs/hash at each provider boundary; fail closed on initial audit failure | Recording transport + real local RLS manifest comparison; browser detail/write denial |
 | Provider outage or malformed response | Bounded timeout/retry; fail closed | Simulated timeout and invalid response tests |
 
 ## Residual risks

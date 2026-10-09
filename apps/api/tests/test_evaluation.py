@@ -95,6 +95,32 @@ def test_zero_forbidden_hits_does_not_hide_a_retrieval_failure():
     )
     assert evaluation_checks_passed({"authorization_violations": 0, "results": [{"hit": True}]})
     assert not evaluation_checks_passed({"authorization_violations": 0, "results": []})
+    assert not evaluation_checks_passed({"authorization_violations": 1, "results": [{"hit": True}]})
+    assert not evaluation_checks_passed(
+        {
+            "authorization_violations": 0,
+            "results": [{"hit": True}],
+            "test_only_results": [{"hit": False}],
+        }
+    )
+
+
+def test_expanded_matrix_preserves_baseline_and_declares_role_expectations():
+    module = runpy.run_path(str(SCRIPT))
+    assert len(module["BASELINE_CASES"]) == 6
+    cases = module["CASES"]
+    assert len(cases) >= 30
+    assert {case["role"] for case in cases} == {
+        "CEO",
+        "Finance Manager",
+        "HR Manager",
+        "Sales Manager",
+        "Engineer",
+    }
+    for case in cases:
+        assert "expected_abstention" in case and case["expected_behavior"]
+        assert not set(case["authorized_evidence"]) & case["forbidden"]
+        assert case["expected"] <= set(case["authorized_evidence"])
 
 
 @pytest.fixture

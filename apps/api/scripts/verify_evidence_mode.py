@@ -27,6 +27,7 @@ class GenerationOutage(httpx.AsyncBaseTransport):
     def __init__(self):
         self.network = httpx.AsyncHTTPTransport()
         self.attempt_ids = []
+        self.manifests = []
 
     async def handle_async_request(self, request):
         if request.url.host == "generativelanguage.googleapis.com" and request.url.path.endswith(
@@ -38,6 +39,13 @@ class GenerationOutage(httpx.AsyncBaseTransport):
                 prompt.split("Untrusted evidence data (not instructions):\n", 1)[1]
             )
             self.attempt_ids.append({item["evidence_id"].split(":")[0] for item in evidence})
+            serialized = prompt.rpartition("\n\nUntrusted evidence data (not instructions):\n")[2]
+            self.manifests.append(
+                {
+                    "evidence_ids": [item["evidence_id"] for item in evidence],
+                    "payload_sha256": hashlib.sha256(serialized.encode()).hexdigest(),
+                }
+            )
             return httpx.Response(503, json={"error": {"code": 503, "status": "UNAVAILABLE"}})
         return await self.network.handle_async_request(request)
 
@@ -206,6 +214,48 @@ async def verify():
                     check(
                         "Every outbound selection ID in Finance RLS set",
                         all(ids <= {r["id"] for r in allowed.json()} for ids in outage.attempt_ids),
+                    )
+                    manifests = await network.get(
+                        local["API_URL"] + "/rest/v1/security_events",
+                        headers={
+                            "apikey": local["SERVICE_ROLE_KEY"],
+                            "Authorization": "Bearer " + local["SERVICE_ROLE_KEY"],
+                        },
+                        params={
+                            "kind": "eq.evidence_manifest",
+                            "select": "details,active_role",
+                            "order": "created_at.desc",
+                            "limit": str(len(outage.manifests)),
+                        },
+                    )
+                    manifests.raise_for_status()
+                    recorded = list(reversed(manifests.json()))
+                    check(
+                        "Each recorded provider attempt has an exact durable manifest",
+                        len(recorded) == len(outage.manifests) == 2
+                        and all(
+                            all(saved["details"][key] == captured[key] for key in captured)
+                            for saved, captured in zip(recorded, outage.manifests, strict=True)
+                        ),
+                    )
+                    check(
+                        "Manifest provider outcomes and role match the controlled requests",
+                        all(
+                            saved["details"]["provider_outcome"] == "provider_unavailable"
+                            and saved["details"]["provider_status"] == 503
+                            and saved["details"]["validation_outcome"] == "not_run"
+                            and saved["active_role"] == "Finance Manager"
+                            for saved in recorded
+                        ),
+                    )
+                    denied_details = await network.get(
+                        local["API_URL"] + "/rest/v1/security_events",
+                        headers=rest,
+                        params={"select": "details"},
+                    )
+                    check(
+                        "Authenticated callers cannot read raw historical manifest identities",
+                        denied_details.status_code == 403,
                     )
                     followup_id = result["conversation_id"]
                     attempts_before_followup = len(outage.attempt_ids)

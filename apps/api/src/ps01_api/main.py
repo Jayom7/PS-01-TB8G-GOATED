@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import runpy
+import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import get_settings
+from .evidence_audit import EvidenceAudit
 from .ingestion import (
     MAX_SOURCE_BYTES,
     IngestionError,
@@ -56,6 +58,7 @@ LOGGER = logging.getLogger("ps01_api")
 DEMO_CREDENTIALS = REPOSITORY_ROOT / ".local-demo-credentials.json"
 DEMO_ROLES = ("CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer")
 EVALUATION_RESULTS = REPOSITORY_ROOT / "data" / "local" / "evaluation.json"
+SECURITY_CHECK_LOCK = asyncio.Lock()
 EVALUATION_LOCK = asyncio.Lock()
 PRIVATE_INGESTION = REPOSITORY_ROOT / "data" / "private" / "ingest"
 
@@ -635,6 +638,59 @@ async def security_status(
     }
 
 
+@app.post("/api/v1/security/checks/run", tags=["security"])
+async def run_security_checks(
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    async with request_client() as client:
+        await require_local_ceo(client, authorization, demo_role)
+    if SECURITY_CHECK_LOCK.locked():
+        raise HTTPException(status_code=409, detail="Security checks are already running")
+    async with SECURITY_CHECK_LOCK:
+        started = datetime.now(UTC)
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(REPOSITORY_ROOT / "apps/api/scripts/run_local_demo.py"),
+            "--skip-generation",
+            cwd=REPOSITORY_ROOT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with asyncio.timeout(100):
+                await process.wait()
+            result = json.loads(
+                (REPOSITORY_ROOT / "data/local/security-verification.json").read_text()
+            )
+            if datetime.fromisoformat(result["completed_at"]) < started:
+                raise ValueError("No current security result")
+        except (TimeoutError, OSError, ValueError, KeyError) as exc:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise HTTPException(status_code=503, detail="Security checks unavailable") from exc
+    # Generation is deliberately excluded from this action. Preserve not-run
+    # checks, and never turn dependency failures into a passing security result.
+    checks = [dict(item) for item in result["checks"]]
+    for item in checks:
+        if (
+            item["name"] == "Real Gemini answer/source inspection"
+            and item.get("detail") == "Explicitly skipped."
+        ):
+            item["status"] = "not_run"
+    return {
+        "state": "failed"
+        if any(c["status"] == "failed" for c in checks)
+        else "unavailable"
+        if any(c["status"] == "blocked" for c in checks)
+        else "passed",
+        "completed_at": result["completed_at"],
+        "checks": checks,
+        "scope": "Live local Auth/RLS/API security verifier; generation explicitly not run",
+    }
+
+
 @app.get("/api/v1/sources", tags=["sources"])
 async def list_sources(
     authorization: str | None = Header(default=None),
@@ -683,6 +739,7 @@ def evaluation_checks_passed(result: dict[str, object]) -> bool:
         and isinstance(rows, list)
         and bool(rows)
         and all(isinstance(row, dict) and row.get("hit") is True for row in rows)
+        and all(row.get("hit") is True for row in result.get("test_only_results", []))
     )
 
 
@@ -690,7 +747,7 @@ def recorded_evaluation(result: dict[str, object]) -> dict[str, object]:
     """Relabel legacy metrics without modifying or claiming to rerun saved data."""
     saved = dict(result)
     saved["run_kind"] = (
-        "recorded_local" if saved.get("schema_version") == 2 else "historical_legacy"
+        "recorded_local" if saved.get("schema_version") in {2, 3} else "historical_legacy"
     )
     if "retrieval_recall_at_k" in saved:
         saved["retrieval_hit_rate_at_k"] = saved.pop("retrieval_recall_at_k")
@@ -1206,6 +1263,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             await emit({"stage": stage})
 
     request_id = str(uuid4())
+    evidence_audit = None
     settings = get_settings()
     fallback_used = False
     model_output = {}
@@ -1343,6 +1401,28 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 model_context: list[dict[str, object]] = []
                 generation_model = None
             else:
+
+                async def write_manifest(method, event_id, body):
+                    if not settings.supabase_secret_key:
+                        raise IntegrationFailure(
+                            "Audit unavailable", code="evidence_manifest_unavailable"
+                        )
+                    key = settings.supabase_secret_key.get_secret_value()
+                    try:
+                        response = await client.request(
+                            method,
+                            f"{settings.supabase_url.rstrip('/')}/rest/v1/security_events",
+                            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                            params={"id": f"eq.{event_id}"} if method == "PATCH" else None,
+                            json=body,
+                        )
+                        response.raise_for_status()
+                    except httpx.HTTPError as exc:
+                        raise IntegrationFailure(
+                            "Audit unavailable", code="evidence_manifest_unavailable"
+                        ) from exc
+
+                evidence_audit = EvidenceAudit(request_id, identity, active_role, write_manifest)
                 await progress("evidence_selected")
                 await progress("generating_response")
                 generation_started = time.perf_counter()
@@ -1359,6 +1439,12 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                             or current_role != active_role
                         ):
                             raise HTTPException(status_code=403, detail="Access context changed")
+                        context_identity = (
+                            current_identity
+                            if scoped == actor_token
+                            else await _identity(client, settings, scoped)
+                        )
+                        evidence_audit.context_user_id = context_identity["user_id"]
                         return await revalidate_evidence(client, settings, scoped, evidence)
 
                     async def before_attempt():
@@ -1372,11 +1458,16 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                                 "Evidence changed before generation", code="evidence_changed"
                             )
                         sent_evidence_count = len(model_context)
+                        evidence_audit.canonical_ids = [row["evidence_id"] for row in model_context]
                         return new_prompt
 
                     try:
                         model_output = await generate_claims(
-                            client, settings, prompt, before_attempt=before_attempt
+                            client,
+                            settings,
+                            prompt,
+                            before_attempt=before_attempt,
+                            attempt_observer=evidence_audit.observe,
                         )
                     except IntegrationFailure as exc:
                         if exc.code not in {
@@ -1418,10 +1509,15 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                             raise provider_failure
                     else:
                         result = validate_generation(model_output, model_context)
+                    await evidence_audit.validation(result["state"])
                 finally:
                     timings["citation_validation_ms"] = round(
                         (time.perf_counter() - validation_started) * 1000, 1
                     )
+        except HTTPException:
+            if evidence_audit:
+                await evidence_audit.validation("not_released")
+            raise
         except httpx.TimeoutException as exc:
             LOGGER.warning("Knowledge request timed out [%s]", request_id)
             raise HTTPException(status_code=503, detail="Knowledge service timed out") from exc
@@ -1429,6 +1525,8 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             LOGGER.warning("Knowledge upstream failed [%s]: %s", request_id, type(exc).__name__)
             raise HTTPException(status_code=503, detail="Knowledge service unavailable") from exc
         except IntegrationFailure as exc:
+            if evidence_audit:
+                await evidence_audit.validation("not_released")
             if exc.code.startswith("provider_"):
                 app.state.provider_status = {
                     "state": exc.code,

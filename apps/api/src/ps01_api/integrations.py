@@ -305,13 +305,15 @@ def model_scoped_quota(response):
         return False
 
 
-async def generate_claims(client, settings, prompt, before_attempt=None):
+async def generate_claims(client, settings, prompt, before_attempt=None, attempt_observer=None):
     if not settings.gemini_api_key:
         raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
     attempts = []
     try:
         async with asyncio.timeout(settings.generation_budget_seconds):
-            return await _generate_bounded(client, settings, prompt, before_attempt, attempts)
+            return await _generate_bounded(
+                client, settings, prompt, before_attempt, attempts, attempt_observer
+            )
     except IntegrationFailure as exc:
         exc.model_attempts = attempts
         raise
@@ -321,7 +323,9 @@ async def generate_claims(client, settings, prompt, before_attempt=None):
         raise failure from exc
 
 
-async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
+async def _generate_bounded(
+    client, settings, prompt, before_attempt, attempts, attempt_observer=None
+):
     shared = _circuit(settings, "shared-quota")
     if failure := _blocked(shared):
         raise failure
@@ -382,76 +386,93 @@ async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
         except BaseException:
             circuit.in_flight = False
             raise
-        attempt = {"model": model, "attempted": True}
+        attempt = {"model": model, "attempted": False}
         attempts.append(attempt)
-        started = time.perf_counter()
+        if attempt_observer:
+            try:
+                await attempt_observer("started", attempt, payload)
+            except BaseException as exc:
+                circuit.in_flight = False
+                attempt["code"] = getattr(exc, "code", "not_sent")
+                raise
+        attempt["attempted"] = True
         try:
-            response = await client.post(
-                f"{GEMINI_API_ROOT}/models/{model}:generateContent",
-                headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
-                json=payload,
-                timeout=httpx.Timeout(20.0, connect=5.0),
-            )
-        except (httpx.TransportError, TimeoutError) as exc:
-            failure = _transport_failure(exc)
-            _cool_down(circuit, failure)
-            attempt["code"] = failure.code
-            last_failure = failure
-            if index + 1 < len(models):
-                await asyncio.sleep(0.25)
-                continue
-            raise failure from exc
-        except asyncio.CancelledError:
-            failure = _transport_failure(TimeoutError())
-            _cool_down(circuit, failure)
-            attempt["code"] = failure.code
+            started = time.perf_counter()
+            try:
+                response = await client.post(
+                    f"{GEMINI_API_ROOT}/models/{model}:generateContent",
+                    headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
+                    json=payload,
+                    timeout=httpx.Timeout(20.0, connect=5.0),
+                )
+            except (httpx.TransportError, TimeoutError) as exc:
+                failure = _transport_failure(exc)
+                _cool_down(circuit, failure)
+                attempt["code"] = failure.code
+                last_failure = failure
+                if index + 1 < len(models):
+                    await asyncio.sleep(0.25)
+                    continue
+                raise failure from exc
+            except asyncio.CancelledError:
+                failure = _transport_failure(TimeoutError())
+                _cool_down(circuit, failure)
+                attempt["code"] = failure.code
+                raise
+            finally:
+                circuit.in_flight = False
+                attempt["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            attempt["provider_status"] = response.status_code
+            if response.is_error:
+                failure = provider_failure(response)
+                attempt["code"] = failure.code
+                retryable = (
+                    response.status_code == 408
+                    or response.status_code >= 500
+                    or (response.status_code == 429 and model_scoped_quota(response))
+                )
+                if (
+                    response.status_code == 429
+                    or response.status_code >= 500
+                    or response.status_code == 408
+                ):
+                    _cool_down(circuit, failure)
+                if response.status_code == 429 and not model_scoped_quota(response):
+                    _cool_down(shared, failure)
+                last_failure = failure
+                if retryable and index + 1 < len(models):
+                    # A different model is a different quota bucket; never retry this
+                    # exhausted model before its RetryInfo interval has elapsed.
+                    await asyncio.sleep(0.25)
+                    continue
+                raise failure
+            try:
+                body = response.json()
+                if body.get("promptFeedback", {}).get("blockReason"):
+                    raise IntegrationFailure("Provider safety block", code="provider_safety_block")
+                candidate = body["candidates"][0]
+                if candidate.get("finishReason") in {"SAFETY", "RECITATION", "PROHIBITED_CONTENT"}:
+                    raise IntegrationFailure("Provider safety block", code="provider_safety_block")
+                output = json.loads(
+                    "".join(p.get("text", "") for p in candidate["content"]["parts"])
+                )
+                if not isinstance(output, dict) or not isinstance(output.get("claims"), list):
+                    raise ValueError("Invalid claims")
+            except (IndexError, KeyError, TypeError, ValueError) as exc:
+                raise IntegrationFailure(
+                    "Malformed structured output", code="provider_invalid_response"
+                ) from exc
+            attempt["code"] = "success"
+            circuit.failure, circuit.until = None, 0
+            return output | {
+                "_model": model,
+                "_fallback_used": model != settings.gemini_chat_model,
+                "_attempts": attempts,
+            }
+        except IntegrationFailure as exc:
+            attempt["code"] = exc.code
             raise
         finally:
-            circuit.in_flight = False
-            attempt["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
-        attempt["provider_status"] = response.status_code
-        if response.is_error:
-            failure = provider_failure(response)
-            attempt["code"] = failure.code
-            retryable = (
-                response.status_code == 408
-                or response.status_code >= 500
-                or (response.status_code == 429 and model_scoped_quota(response))
-            )
-            if (
-                response.status_code == 429
-                or response.status_code >= 500
-                or response.status_code == 408
-            ):
-                _cool_down(circuit, failure)
-            if response.status_code == 429 and not model_scoped_quota(response):
-                _cool_down(shared, failure)
-            last_failure = failure
-            if retryable and index + 1 < len(models):
-                # A different model is a different quota bucket; never retry this
-                # exhausted model before its RetryInfo interval has elapsed.
-                await asyncio.sleep(0.25)
-                continue
-            raise failure
-        try:
-            body = response.json()
-            if body.get("promptFeedback", {}).get("blockReason"):
-                raise IntegrationFailure("Provider safety block", code="provider_safety_block")
-            candidate = body["candidates"][0]
-            if candidate.get("finishReason") in {"SAFETY", "RECITATION", "PROHIBITED_CONTENT"}:
-                raise IntegrationFailure("Provider safety block", code="provider_safety_block")
-            output = json.loads("".join(p.get("text", "") for p in candidate["content"]["parts"]))
-            if not isinstance(output, dict) or not isinstance(output.get("claims"), list):
-                raise ValueError("Invalid claims")
-        except (IndexError, KeyError, TypeError, ValueError) as exc:
-            raise IntegrationFailure(
-                "Malformed structured output", code="provider_invalid_response"
-            ) from exc
-        attempt["code"] = "success"
-        circuit.failure, circuit.until = None, 0
-        return output | {
-            "_model": model,
-            "_fallback_used": model != settings.gemini_chat_model,
-            "_attempts": attempts,
-        }
+            if attempt_observer:
+                await attempt_observer("finished", attempt, payload)
     raise last_failure or IntegrationFailure("No eligible model", code="provider_invalid_model")

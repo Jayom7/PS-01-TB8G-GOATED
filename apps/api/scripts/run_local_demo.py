@@ -181,6 +181,70 @@ def main() -> int:
                 json={"query": "invoice", "role": "CEO", "evidence": []},
             )
             record("Client-supplied identity/evidence rejected", forged.status_code == 422)
+            forged_org = client.post(
+                f"{api}/api/v1/chat/query",
+                headers=headers("HR Manager"),
+                json={"query": "invoice", "organization_id": "foreign-org"},
+            )
+            record("Client-supplied organization rejected", forged_org.status_code == 422)
+            finance_rest = headers("Finance Manager") | {"apikey": local["PUBLISHABLE_KEY"]}
+            history = client.get(
+                f"{base}/rest/v1/query_history",
+                headers=finance_rest,
+                params={"select": "conversation_id", "limit": "1"},
+            )
+            history.raise_for_status()
+            if history.json():
+                foreign_id = history.json()[0]["conversation_id"]
+                foreign = client.get(
+                    f"{api}/api/v1/conversations/{foreign_id}", headers=headers("HR Manager")
+                )
+                record("Foreign Finance conversation denied to HR", foreign.status_code == 404)
+            else:
+                blocked(
+                    "Foreign Finance conversation denied to HR", "No saved Finance conversation"
+                )
+            vector = rows_by_role["Finance Manager"][0]["embedding"]
+            if isinstance(vector, str):
+                vector = json.loads(vector)
+            for role, query, label in [
+                (
+                    "Finance Manager",
+                    "invoice ACM-INV-999999 total",
+                    "Exact nonexistent ID never substitutes another invoice",
+                ),
+                (
+                    "HR Manager",
+                    "invoice ACM-INV-2048 total",
+                    "HR exact Finance identifier returns no evidence",
+                ),
+            ]:
+                result = client.post(
+                    f"{base}/rest/v1/rpc/match_knowledge_chunks",
+                    headers=headers(role) | {"apikey": local["PUBLISHABLE_KEY"]},
+                    json={"query_embedding": vector, "query_text": query, "match_count": 12},
+                )
+                result.raise_for_status()
+                record(label, result.json() == [])
+            # Existing deletion tombstones only; never delete a demo source to test.
+            deleted = client.get(
+                f"{base}/rest/v1/source_cleanup_jobs",
+                headers={
+                    "apikey": local["SERVICE_ROLE_KEY"],
+                    "Authorization": "Bearer " + local["SERVICE_ROLE_KEY"],
+                },
+                params={"select": "source_id", "limit": "1"},
+            )
+            deleted.raise_for_status()
+            if deleted.json():
+                deleted_id = deleted.json()[0]["source_id"]
+                for suffix in ("", "/original", "/original?page=1"):
+                    result = client.get(
+                        f"{api}/api/v1/sources/{deleted_id}{suffix}", headers=headers("CEO")
+                    )
+                    record("Deleted source lookup denied" + suffix, result.status_code == 404)
+            else:
+                blocked("Deleted source lookup denied", "No deletion tombstone available")
             contract = next(
                 row for row in rows_by_role["CEO"] if row["source_id"] == "ACM-MSA-2026-07"
             )

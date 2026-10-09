@@ -1,5 +1,7 @@
 # Clearframe final implementation and acceptance report — 2026-10-09
 
+This is the earlier end-to-end report. The [latest Final Engineering Phase 1 section](MASTER_ACCEPTANCE_CHECKLIST.md) supersedes its test/count/runtime claims: 138 API tests and 24 controlled-outage integration checks; current preserved corpus 18/44/6 with the purchase-order seed absent. It records the actual starting/source-ending Git HEAD, exact provider 429→configured fallback 200 observation and remaining work.
+
 Real Gemini primary and configured fallback answers now work. The browser produced the correct scanned USD 48,000 amount and contract terms with `gemini-3.8-flash`; the normal API produced fresh PDF/database answers with `gemini-3.7-flash`. A real API integration produced all three modalities through the fallback, verified exact previews and independently captured outbound evidence IDs against Finance RLS. Its primary transport deadline was deliberately interrupted; external dependencies and the fallback response were real.
 
 All independently achievable implementation and verification is finished. Submission reliability still depends on intermittent Gemini availability. Some normal cross-modal requests and the latest full verifier returned 503/timeouts. Fresh OCR-specific generation, real Google completion, password update and timed expiry checks remain explicitly unfinished below.

@@ -2,7 +2,13 @@
 
 Clearframe is the PS-01 multimodal RAG product. NovaCore Industries is its fictional demo tenant. PDF pages, real OCR regions and seven typed PostgreSQL business tables share a pgvector/metadata index with retrieval-time RLS.
 
-## Current acceptance — 2026-10-09
+## Final Engineering Phase 1 — latest
+
+138 API tests, 55 SQL assertions, 5 session tests and production build pass. Real primary HTTP429 switched once to configured 3.7 fallback HTTP200 (4584.7ms total). A distinct verified-evidence response handles transient generation outages after successful retrieval, with canonical citations, current authorization and an explicit no-language-model label. Controlled generation HTTP503 integration passed 24 checks using real local dependencies.
+
+Current preserved data is 18 documents/44 chunks/6 typed rows: the purchase-order seed was already absent. Full seed readiness remains failed; fresh OCR-specific model generation is unverified. See the latest [Phase 1 acceptance](docs/MASTER_ACCEPTANCE_CHECKLIST.md). Separate security/evaluation/frontend phases have not begun.
+
+## Earlier end-to-end acceptance — historical 2026-10-09
 
 **Verified locally:** 103 backend tests, 5 session/redirect tests, 55 pgTAP assertions, Ruff/format, frontend lint/types/build and 51 live authorization/refusal checks. Five local migrations are applied. Fresh browser PDF/OCR/invoice workflows passed 29 checks and 22 deletion checks; the resume added 30 real deletion/generated-history/cleanup checks. The retained corpus is 19 sources, 45 chunks and 7 typed rows. Six routes passed both themes at four sizes (48 combinations), with 8 additional populated Ask checks.
 

@@ -1,5 +1,9 @@
 # RAG pipeline
 
+Phase 1 update: after generation returns or exhausts transient failures, the API rechecks actor/org/role and current RLS chunks before final validation. Progress contains only a stage name. Current generation failure can produce `VERIFIED_EVIDENCE`: conservative deterministic extraction of one invoice's amount, terms/status, requiring every requested fact/modality and consistent canonical values. It uses the existing citation validator/exact previews, labels the answer as composed without a language model and preserves provider cause/attempts without claiming generation success. Unsupported, ambiguous, incomplete, poisoned or contradictory evidence abstains. Authentication/configuration/safety/malformed-output errors never trigger this mode. Embedding/retrieval still need configured services; this is not offline RAG.
+
+Replay reconstructs from current evidence and states provider availability was not rerun. General entailment and atomic external-call revocation remain unimplemented guarantees. The latest Phase 1 acceptance section gives current tests/data counts; runtime observations below are from the earlier end-to-end pass.
+
 PDF extraction preserves pages; scanned PDFs use local OCR. Images undergo signature/header/decode checks and retain OCR coordinates. Limits: 25 MB, 100 PDF pages, 16 million decoded pixels, 1,000 OCR regions. These are bounded demo parsers, not production process isolation. Structured ingestion whitelists seven typed tables, validates business fields, inserts under server-assigned tenant/source IDs, rereads the row and embeds its canonical text. Money is integer minor units; overdue status uses the row's explicit snapshot date.
 
 1. Verify Auth and resolve the local actor/org/role-bound context.

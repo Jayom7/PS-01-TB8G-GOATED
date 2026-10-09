@@ -1,5 +1,44 @@
 # Clearframe master acceptance — 2026-10-09
 
+## Final Engineering Phase 1 — latest verified state
+
+This section supersedes earlier runtime/count claims below. Phase 1 only; the separate security/evaluation and frontend phases have not begun. Starting HEAD was clean `f8e9a2c6f03f6eea2a437dc437e5cab3ba267e5f` on `main`, matching both local `origin/main` and actual `git ls-remote`. `b44ba79` was an older milestone. Source ending HEAD measured after verification: `a1c3fda8d42d236b057d6839de6bd34d9a143491`; final documentation HEAD/status is reported in chat.
+
+| Phase 1 requirement | Status | Exact fresh evidence |
+|---|---|---|
+| Baseline, diffs, reports, handoff tickets | PASS | Clean/staged/untracked diffs inspected; eight requested reports plus handoff tickets/test plan read. Current implementation outranks stale counts/MRR tickets; no reset/stash/reseed/hosted operation. |
+| Architecture and provider bounds preserved | PASS | Caller/broker JWT + SECURITY INVOKER RLS retained; embedding-2/1536, configured models, 20s attempt/45s generation budget, two attempts/quota classification unchanged. No installs, model downloads, keys/billing/provider changes. Ollama executable absent; no integration added. |
+| One bounded real generation | PASS | `run_local_demo.py`, actual PostgreSQL trace at10:22:55.017514Z: primary3.8 HTTP429 (`provider_rate_limited`), configured3.7 fallback HTTP200, `CITATION_VALIDATED`, exact authorized OCR USD 48,000 preview, total4584.7ms. This baseline observation preceded Phase 1 answer-path edits; no second real generation request. Saved `data/local/phase1-real-generation-baseline.json`; log `/private/tmp/clearframe-phase1-live-attempt.log`. |
+| Verified-evidence response mode | PASS | `verified_evidence_response`: deterministic bounded invoice amount/terms/status extraction after transient generation unavailability/timeout/quota. Requires one current invoice identity, all requested facts/modalities and consistent values; otherwise abstains with precise provider error. Existing validator/canonical citations retained. New `VERIFIED_EVIDENCE` state, null generation_model, actual failure/attempt metadata and explicit no-language-model label; never counted as live Gemini success. |
+| Real integration under controlled outage | PASS | Final `verify_evidence_mode.py`: **24 checks passed**, timestamp in `data/local/phase1-evidence-mode.json`. Real Auth/RLS/embedding/OCR/history/previews/deletion; only configured generateContent HTTP503 responses deliberately injected. No successful model response mocked, no actual generation request sent. Finance three-modality extract, seeded outgoing IDs compared with real Finance RLS set, HR no-answer/no-generation, fresh OCR USD 1,234.00/exact citation, deleted extract replay/unknown-ID refusal pass. |
+| Query lifecycle/final authorization | PASS | Actor/org/role and exact chunks rechecked after provider completion before canonical validation/release. Deleted/revoked/changed sources removed; changed actor/org403. Actual SSE handler under controlled outage: stage-only payloads, ordered operations, one final result. Unit success/insufficient/terminal-error/revocation paths pass; no source names, counts or state in progress. Existing queue architecture retained. |
+| History and UI semantics | PASS | Mode replay reruns extraction on current RLS evidence, discards saved text/provider assertions. Actual Finance browser reopened three-source thread after API restart, explicit reconstructed-without-model label/exact invoice fields; desktop1280×720/mobile390×844 no page overflow. Screenshot `docs/design/phase1-verified-evidence.png`. |
+| Evidence-based retrieval decisions | PASS | Hybrid SQL inspected: invoker, 1536, semantic + nonzero full-text RRF, authorized exact-ID restriction/stable ties. No ranking/chunking/reindex changes; prior small synthetic MRR0.80 retained as historical, not a fresh production benchmark. Missing exact small-talk phrases added with full-string matches; mixed business questions still retrieve. |
+| Tests/static/build | PASS | **138 pytest**, 240 dependency warnings; **55 pgTAP**, **5 session tests**; Ruff/format28 files, ESLint, TypeScript, Next build, diff check pass. Logs `/private/tmp/clearframe-phase1-{final-tests,sql,web-tests,web-lint,web-types,build,final-integration}.log`. Six source files scanned:0 credential-pattern matches, 0 credential/env paths. |
+| Source delivery | PASS | Source milestone `a1c3fda` committed after checks and pushed normally: existing origin advanced `f8e9a2c`→`a1c3fda`. Final documentation delivery HEAD/status is reported after its push. |
+| Full seed readiness | FAIL | Database already lacks `structured/orders.json`/purchase-order row: **18 documents/44 chunks/6 typed rows**, preserved before/after integration. `verify_services.py` stops at seven-table seed check; direct live suite51 PASS/3 FAIL (CEO/Finance/Engineer full manifest coverage). Synthetic guard permits only a nonempty unique fully hash-bound subset; unknown/duplicate/unbound documents fail. No deleted seed silently restored. Recovery: operator decides whether deletion was intentional. If restoration is approved, restore only that manifest source/typed row/chunk/grants with its original fixture metadata/hash, then rerun wrapper; no reset/full reseed. Normal new-source ingestion alone does not recreate manifest identity. |
+| Fresh OCR-specific model generation | NOT RUN | Fresh OCR extraction/indexing/authorized deterministic answer/deletion pass; these are not model-generation proof. One real model attempt used the existing seed; no repeated quota-consuming attempts. |
+
+Limits: verified evidence mode requires successful embedding/retrieval; it is generation-independent, not offline. It supports a conservative English invoice grammar, not arbitrary questions/entailment. Safety blocks, malformed output, authentication/configuration errors never trigger extraction. External-call revocation remains non-atomic: already sent bytes cannot be recalled. General semantic/exhaustive contradiction/injection guarantees, hosted Auth/RLS, Google completion, credential-change handoff and later UI/evaluation work remain outside this Phase 1 completion claim.
+
+Reproduce from preserved services:
+
+```sh
+./scripts/dev
+# One bounded real-provider check; inspect its status, never loop on quota:
+.venv/bin/python apps/api/scripts/run_local_demo.py
+# Deliberately injected generation HTTP503; real dependencies/disposable OCR cleanup:
+.venv/bin/python apps/api/scripts/verify_evidence_mode.py
+.venv/bin/pytest apps/api/tests -q
+node_modules/.bin/supabase test db
+node --experimental-strip-types --test apps/web/tests/session.test.mjs
+./scripts/verify_demo # Currently stops at missing purchase-order seed.
+```
+
+If usage interrupts a future continuation, preserve changes and use this section plus actual Git status/HEAD/upstream and ignored verification timestamps as the resume point. Do not repeat completed real generation to recreate historical proof. The current launcher is running without `--seed`.
+
+## Earlier end-to-end pass (historical)
+
 Resumed the preserved main checkout at implementation milestone `20b0b36` (original entry `8305326`). Completed phases 0–9 in order, then repaired newly exposed runtime defects. Historical intermediate logs are retained below; this matrix supersedes their earlier blocked states. PASS always refers to the stated executed scope.
 
 ## Final phase acceptance

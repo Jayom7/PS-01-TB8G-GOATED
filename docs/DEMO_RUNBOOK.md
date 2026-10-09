@@ -1,6 +1,8 @@
 # Demo runbook — current implementation
 
-Real primary and fallback answers are now verified. Provider availability remains intermittent; the latest full verifier returned upstream 503. Do not substitute fixture answers or repeatedly cycle unavailable models. Exact runtime scope is in MASTER_ACCEPTANCE_CHECKLIST.md.
+Latest Phase 1: `VERIFIED_EVIDENCE` is explicitly composed without a language model after transient generation failure. Demonstrate this reproducibly with `.venv/bin/python apps/api/scripts/verify_evidence_mode.py`: generation HTTP503 is deliberately injected; Auth/RLS/embedding/OCR/history/previews/deletion are real. The script creates/deletes only its disposable OCR upload. Reopen its three-source Finance history to inspect the label/citations. This is not a live Gemini outage or successful model generation. Current full wrapper stops on the already-absent purchase-order fixture; see MASTER_ACCEPTANCE_CHECKLIST before attempting restoration.
+
+Earlier end-to-end runs verified real primary/fallback answers and observed intermittent503/timeouts. The Phase 1 bounded attempt observed primary429 then fallback200; full seed readiness currently stops on the missing purchase-order fixture. Do not substitute fixture answers or repeatedly cycle unavailable models. Exact runtime scope is in MASTER_ACCEPTANCE_CHECKLIST.md.
 ## Start and verify
 
 ```sh
@@ -35,7 +37,7 @@ Start the existing Docker runtime first. ./scripts/dev reuses local data, applie
 .venv/bin/python apps/api/scripts/verify_product.py --prepare-assets
 ```
 
-Through Ingest's real browser file chooser upload data/local/acceptance-assets/fresh-acceptance.pdf and .png, granting Finance (CEO retained). Insert one invoices row with source name “Disposable invoice CF-INV-1009”; use the existing Acme customer identity from Sources. Set invoice_id CF-INV-1009,total_minor_units123400,currencyUSD,payment_statusunpaid and valid invoice/due/status_as_of dates; the form enforces its complete schema. Then:
+Through Ingest's real browser file chooser upload data/local/acceptance-assets/fresh-acceptance.pdf and .png, granting Finance (CEO retained). Insert one invoices row with source name “Disposable invoice CF-INV-1009”; use the existing Acme customer identity from Sources. Set invoice_id CF-INV-1009, total_minor_units123400, currencyUSD, payment_statusunpaid and valid invoice/due/status_as_of dates; the form enforces its complete schema. Then:
 
 ```sh
 .venv/bin/python apps/api/scripts/verify_product.py

@@ -1,5 +1,7 @@
 # Architecture — current local acceptance
 
+Phase1 closeout: generation has credential/model-scoped metadata-only circuits with30–120s cooldown, one in-flight call/probe per model and preserved20s/45s budgets. Recent chat citations identify referents only after current scoped RLS reads; typed rows never expand into unrelated rows in a shared table document. Every business query still retrieves anew. Evaluation reuses local private JSON artifacts, atomic replacement and bounded archived run metadata; no evaluation database or distributed worker lock was added.
+
 Next.js 16.4 / React 19, FastAPI, Supabase Auth/Postgres, pgvector 1536 and Gemini REST adapters. Five additive migrations are applied locally; hosted deployment is unverified and untouched.
 
 ```mermaid

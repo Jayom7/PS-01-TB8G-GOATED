@@ -1,6 +1,30 @@
 # Clearframe final implementation and acceptance report — 2026-10-09
 
-This is the earlier end-to-end report. The [latest Final Engineering Phase 1 section](MASTER_ACCEPTANCE_CHECKLIST.md) supersedes its test/count/runtime claims: 138 API tests and 24 controlled-outage integration checks; current preserved corpus 18/44/6 with the purchase-order seed absent. It records the actual starting/source-ending Git HEAD, exact provider 429→configured fallback 200 observation and remaining work.
+## Phase 1 closeout — latest
+
+Source milestone `1bfac2657e3e4c94758ffc35b8ebfce569d91165` on main, starting05ca638, normally pushed through the existing origin. Exact final documentation HEAD/status follows in the delivery response. No Phase2 expansion or hosted/provider/auth-policy changes.
+
+The768-minute copy came from the old SSE client blindly converting upstream retry seconds into minutes and appending it to the API detail; verified-evidence copy also exposed retry seconds. The current bounded real Ask observation was accurately429 from both configured models, not503:466.2ms/382.2ms, total2485.7ms, then a canonical USD48,000 `VERIFIED_EVIDENCE` answer. There is no evidence establishing the exact old768-minute incident's HTTP status. Current closeout does not claim generated success; prior configured-fallback200 proof remains historical.
+
+The adapter now handles408/5xx/transport/timeouts and model-scoped429 with one configured fallback, shared/unknown quota fail-fast, credential/model cooldown30–120s and one concurrent call/probe per model. Invalid requests/auth/model, safety and malformed responses are terminal. Exact status/attempt/retry metadata stays in diagnostics; ordinary chat uses calm mapped copy and a retained-query retry.
+
+RAG adds exact greeting/capability/thanks helpers, finite wording repairs, current-RLS invoice referents and clarification without hidden facts. Typed referents retain their row; follow-up facts are always retrieved anew. Canonical invoice/contract/document prose answers the requested fact without unsupported model wording. Existing invoice-ID/contradiction/deletion/replay boundaries remain tested.
+
+User messages align right and responses left after reopening/reload, with SSE result deduplication. Sources, found-source disclosures and Security activity have keyboard-focusable responsive scroll regions; long titles wrap. Actual18-source/30-event desktop/mobile checks and34 DOM layout assertions passed (failure fixture explicitly separate from real integration).
+
+Evaluation now preserves truthful restricted/empty/unavailable/completed states and real CLI/app provenance, private atomic latest/archive persistence, timestamp/run ID/corpus/duration and previous runs. The actual CEO app run at2026-10-09T12:00:27.215071Z completed in5379.1ms: six queries plus directHR, hit@12=1,MRR0.80,zero forbidden,59/59locations,mean702.5ms,corpus18/44/6. It survived reload and API/web restart. Genuine absent-artifact state and byte-for-byte restoration were checked; no database evaluation row or metrics were fabricated.
+
+Verification: **175 backend tests**, **8 frontend tests**, **55 SQL assertions**; Ruff/format28files, lint, types, production build and diff check PASS. Final real-local controlled-generation503 integration **29/29** at14:17:57Z, zero real generateContent requests/two controlled attempts, actual Auth/RLS/embeddings/OCR/previews/history/deletion. Backend emitted366 dependency/deprecation warnings. Source/tests and screenshots are committed; latest normal launcher runs without reseed.
+
+**Unfinished:** current live generation quota and fresh OCR-specific generated answer BLOCKED; full readiness wrapper FAIL (exit2, pre-existing missing purchase-order source/typed row,18/44/6 preserved); real Google completion BLOCKED on private operator configuration; password-update success and timed recovery-link expiry NOT RUN; optional wall-clock expiry/automated accessibility/reduced-motion emulation NOT RUN. Hosted/production-scale/semantic-entailment/atomic external-revocation guarantees remain outside verified scope. The [master checklist](MASTER_ACCEPTANCE_CHECKLIST.md) explicitly reconciles every original phase, PS-01 item, demo step and recovery action.
+
+Reproduce: `./scripts/dev` (reuse running instance), `.venv/bin/pytest apps/api/tests -q`, `node --experimental-strip-types --test apps/web/tests/*.test.mjs`, `node_modules/.bin/supabase test db`, `.venv/bin/python apps/api/scripts/verify_evidence_mode.py`. Full `./scripts/verify_demo` remains blocked by the preserved seed gap before generation. Do not reset/reseed or loop real-provider requests.
+
+[Real persisted app Evaluation](design/closeout-evaluation.png) · [Real canonical chat replay](design/closeout-ask.png).
+
+## Earlier end-to-end report — historical
+
+The following end-to-end report is historical. The Phase1 closeout summary above and current MASTER_ACCEPTANCE_CHECKLIST supersede its counts and current provider claims.
 
 Real Gemini primary and configured fallback answers now work. The browser produced the correct scanned USD 48,000 amount and contract terms with `gemini-3.8-flash`; the normal API produced fresh PDF/database answers with `gemini-3.7-flash`. A real API integration produced all three modalities through the fallback, verified exact previews and independently captured outbound evidence IDs against Finance RLS. Its primary transport deadline was deliberately interrupted; external dependencies and the fallback response were real.
 

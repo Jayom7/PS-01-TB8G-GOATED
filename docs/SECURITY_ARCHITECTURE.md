@@ -1,5 +1,7 @@
 # Security architecture
 
+Phase1 closeout preserves existing Auth/RLS/broker policies. Recent conversation claims provide UUID pointers only; facts are reread under the current scoped JWT. Typed referents retain their exact row identity; PDF/OCR identity uses only currently authorized siblings. Generic clarification reveals no source IDs/amounts. Provider circuits contain failure metadata and credential fingerprints, never queries/evidence/tokens. Ordinary chat filters raw diagnostics; restricted server logs retain precise status/attempt/retry metadata. Concurrency guards are per worker and do not claim distributed rate limiting.
+
 - Supabase verifies bearer identity. Accounts without an assigned profile/role are denied; login never provisions privileges. Local global signup is disabled, while the email provider remains enabled.
 - Retrieval, previews and history evidence reads forward user/scoped demo JWTs to SECURITY INVOKER RPC/RLS. No broad service-key read enters a generation context.
 - Only the explicitly provisioned local CEO may broker one of five seeded contexts. Cache keys include actor, organization and role. Every reuse verifies current target org/role/email. Local storage and X-Demo-Role are requests, never authorization.

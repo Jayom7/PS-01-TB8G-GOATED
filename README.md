@@ -2,11 +2,13 @@
 
 Clearframe is the PS-01 multimodal RAG product. NovaCore Industries is its fictional demo tenant. PDF pages, real OCR regions and seven typed PostgreSQL business tables share a pgvector/metadata index with retrieval-time RLS.
 
-## Final Engineering Phase 1 — latest
+## Phase 1 closeout — latest
 
-138 API tests, 55 SQL assertions, 5 session tests and production build pass. Real primary HTTP429 switched once to configured 3.7 fallback HTTP200 (4584.7ms total). A distinct verified-evidence response handles transient generation outages after successful retrieval, with canonical citations, current authorization and an explicit no-language-model label. Controlled generation HTTP503 integration passed 24 checks using real local dependencies.
+175 API tests, 55 SQL assertions, 8 frontend tests, lint/types and production build pass. The final controlled-generation-outage integration passed 29 checks against real local Auth, RLS, embeddings, OCR, previews, history and deletion. Bounded configured-model failover now includes credential/model-scoped cooldowns and single probes; ordinary chat keeps accurate, calm failure copy without upstream diagnostics. Conversational references use freshly authorized source reads; exact IDs and canonical citations remain mandatory.
 
-Current preserved data is 18 documents/44 chunks/6 typed rows: the purchase-order seed was already absent. Full seed readiness remains failed; fresh OCR-specific model generation is unverified. See the latest [Phase 1 acceptance](docs/MASTER_ACCEPTANCE_CHECKLIST.md). Separate security/evaluation/frontend phases have not begun.
+The real app Evaluation action persisted a synthetic run at 2026-10-09T12:00:27Z: six queries plus a direct HR check, hit@12 1.0, MRR 0.80, zero forbidden hits, corpus18/44/6. CLI artifacts, app runs, history, restricted access and no recorded run are distinct. Chat alignment and long-list desktop/mobile checks are recorded in the [acceptance checklist](docs/MASTER_ACCEPTANCE_CHECKLIST.md).
+
+The one current real Ask check received primary429/fallback429 and safely returned explicitly labelled verified evidence. Fresh generated success is **not** claimed for this closeout. Historical real fallback200 evidence remains historical. The purchase-order seed was already absent; full seed readiness still fails. Google completion and credential-change/timed-expiry checks remain unfinished. No separate Phase 2 work or hosted/provider/auth-policy changes.
 
 ## Earlier end-to-end acceptance — historical 2026-10-09
 

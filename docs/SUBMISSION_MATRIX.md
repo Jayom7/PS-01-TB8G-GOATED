@@ -1,5 +1,7 @@
 # PS-01 submission matrix — final local pass
 
+Latest Phase1 closeout supersedes historical counts below:175 API/8 frontend/55 SQL tests;29 real local controlled-outage checks; actual app Evaluation at12:00:27Z, hit@12=1/MRR0.80/zero forbidden, six queries plus direct HR, corpus18/44/6. Current live Ask returned primary429/fallback429 and labelled VERIFIED_EVIDENCE, not current generated success. Full seed readiness fails because the purchase-order source was already absent. Fresh OCR-generated answer, Google completion, actual password change and timed-expiry checks remain unfinished; all exact scopes/recovery steps are in MASTER_ACCEPTANCE_CHECKLIST.md. No Phase2 expansion.
+
 [MASTER_ACCEPTANCE_CHECKLIST](MASTER_ACCEPTANCE_CHECKLIST.md) maps all 16 PS-01 items, phases 0–9 and 12 demo steps. All independently achievable implementation is complete. Provider consistency and external/handoff checks remain explicit.
 
 | Requirement | Actual evidence | Status |

@@ -7,6 +7,7 @@ import { Drawer } from "@/components/drawer";
 import { Icon, type IconName } from "@/components/icons";
 import { createClient } from "@/lib/supabase/client";
 import { sessionToken } from "@/lib/session";
+import { appendTurn, chatErrorMessage } from "@/lib/chat-state";
 
 export type View = "Dashboard" | "Ask" | "Sources" | "Ingest" | "Security" | "Evaluation";
 type Citation = {
@@ -20,7 +21,7 @@ type QueryResult = {
   request_id: string;
   conversation_id?: string;
   message?: string;
-  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "VERIFIED_EVIDENCE" | "INSUFFICIENT_EVIDENCE";
+  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "VERIFIED_EVIDENCE" | "INSUFFICIENT_EVIDENCE" | "CLARIFICATION_NEEDED";
   claims: Claim[];
   trace: {
     session_verified: boolean;
@@ -114,6 +115,10 @@ type EvaluationData = {
   results: Record<string, unknown>[];
   completed_at?: string;
   measured_checks?: Record<string, boolean | number | string | null>;
+  execution_origin?: string;
+  duration_ms?: number;
+  corpus?: Record<string, number>;
+  history?: { completed_at?: string; dataset?: string; query_count?: number; execution_origin?: string }[];
 };
 
 const DEMO_ROLES = ["CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer"];
@@ -145,13 +150,7 @@ async function readResponse<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const code = typeof body?.code === "string" ? body.code : "";
-    const messages: Record<string, string> = {
-      provider_unavailable: "The AI service is unavailable right now. Your question was not answered.",
-      provider_rate_limited: "Answer generation is temporarily unavailable because the AI service is rate-limited. Your retrieved evidence remains protected; please retry later.",
-      provider_timeout: "The AI service took too long to respond. Please try again.",
-      provider_invalid_response: "The AI service returned an unusable answer. Please retry.",
-      retrieval_unavailable: "Authorized search could not complete. No answer was generated.",
-    };
+    if (code.startsWith("provider_") || ["retrieval_unavailable", "evidence_changed"].includes(code)) throw new Error(chatErrorMessage(body, response.status));
     const message = response.status === 401
       ? "Your session expired. Sign in again to continue."
       : response.status === 403
@@ -160,7 +159,9 @@ async function readResponse<T>(response: Response): Promise<T> {
           ? "This source is no longer available to your account."
           : response.status === 422
             ? "Check the submitted values and try again."
-            : messages[code] ?? (response.status >= 500
+            : response.status === 409
+              ? "Another operation is already running. Refresh shortly."
+              : (response.status >= 500
               ? "The workspace service is temporarily unavailable. Please retry."
               : "The request could not be completed. Check the input and try again.");
     throw new Error(message);
@@ -239,6 +240,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [sources, setSources] = useState<Source[] | null>(null);
   const [security, setSecurity] = useState<SecurityData | null>(null);
   const [evaluation, setEvaluation] = useState<EvaluationData | null>(null);
+  const [evaluationState, setEvaluationState] = useState("loading");
+  const [evaluationRunning, setEvaluationRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -298,6 +301,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     setAskedQuery(question);
     setStage("connecting");
     setRetryEvidence([]);
+    let complete = false;
     try {
       const token = await currentToken();
       if (!token) {
@@ -315,7 +319,6 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       if (!reader) throw new Error("The response stream is unavailable.");
       const decoder = new TextDecoder();
       let buffer = "";
-      let complete = false;
       while (true) {
         const { value, done } = await reader.read();
         buffer += decoder.decode(value, { stream: !done });
@@ -330,13 +333,13 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           if (kind === "error") {
             if (payload.code === "session_expired") sessionExpired();
             setRetryEvidence(payload.evidence ?? []);
-            const retry = payload.retry_after_seconds ? ` Retry after ${Math.ceil(payload.retry_after_seconds / 60)} minutes.` : "";
-            throw new Error((payload.detail ?? "The answer service is unavailable.") + retry);
+            throw new Error(chatErrorMessage(payload));
           }
           if (kind === "result") {
+            if (complete) continue;
             setResult(payload);
             setConversationId(payload.conversation_id ?? null);
-            setTurns((previous) => [...previous, { query: question, response: payload }]);
+            setTurns((previous) => appendTurn(previous, { query: question, response: payload }));
             setQuery("");
             complete = true;
           }
@@ -346,7 +349,10 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       if (!complete) throw new Error("The response ended before a validated answer arrived.");
       void loadHistory();
     } catch (cause) {
-      setError(networkMessage(cause, "The answer could not be generated."));
+      if (!complete) {
+        setQuery(question);
+        setError(networkMessage(cause, "The answer could not be generated."));
+      }
     } finally {
       askInFlight.current = false;
       setPending(false);
@@ -414,6 +420,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       setSources(null);
       setSecurity(null);
       setEvaluation(null);
+      setEvaluationState("loading");
       sourceRequest.current += 1;
       setActiveSource(null);
       setTraceOpen(false);
@@ -577,9 +584,10 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       if (!activeRoleRef.current || activeRoleRef.current === activeRole) {
         setWorkspace(context);
         setEvaluation(data.result);
+        setEvaluationState(data.state);
         setError(null);
       }
-    } catch (cause) { if (!activeRoleRef.current || activeRoleRef.current === activeRole) setError(networkMessage(cause, "Evaluation state is unavailable.")); }
+    } catch (cause) { if (!activeRoleRef.current || activeRoleRef.current === activeRole) { setEvaluationState("unavailable"); setError(networkMessage(cause, "Evaluation state is unavailable.")); } }
     finally { setPending(false); }
   }, [activeRole]);
 
@@ -587,10 +595,10 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     const timer = window.setTimeout(() => {
       if (view === "Sources" && sources === null) void loadSources();
       if (view === "Security" && security === null) void loadSecurity();
-      if (view === "Evaluation" && evaluation === null) void loadEvaluation();
+      if (view === "Evaluation" && evaluationState === "loading") void loadEvaluation();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [evaluation, loadEvaluation, loadSecurity, loadSources, security, sources, view]);
+  }, [evaluationState, loadEvaluation, loadSecurity, loadSources, security, sources, view]);
 
   function selectView(nextView: View) {
     setError(null);
@@ -674,7 +682,9 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   }
 
   async function runEvaluation() {
+    if (pending) return;
     setPending(true);
+    setEvaluationRunning(true);
     setError(null);
     try {
       const token = await currentToken();
@@ -683,8 +693,9 @@ export default function Workspace({ identity, view }: { identity: string; view: 
         method: "POST", headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
       }));
       setEvaluation(payload.result);
+      setEvaluationState("completed");
     } catch (cause) { setError(networkMessage(cause, "The evaluation run failed.")); }
-    finally { setPending(false); }
+    finally { setPending(false); setEvaluationRunning(false); }
   }
 
   const role = activeRole || workspace?.active_role || workspace?.identity.role || (error ? "Unavailable" : "Loading");
@@ -820,7 +831,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           ) : view === "Security" ? (
             <SecurityView data={security} pending={pending} error={error} onRefresh={() => void loadSecurity()} />
           ) : (
-            <EvaluationView data={evaluation} pending={pending} error={error} role={role} onRefresh={() => void loadEvaluation()} onRun={() => void runEvaluation()} />
+            <EvaluationView data={evaluation} state={evaluationState} running={evaluationRunning} pending={pending} error={error} role={role} onRefresh={() => void loadEvaluation()} onRun={() => void runEvaluation()} />
           )}
         </section>
       </div>
@@ -844,7 +855,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           ["Question", askedQuery], ["Identity", userName], ["Authorization", role],
           ["Retrieval", "Database policies applied before results are returned"],
           ["Evidence", result.trace.history_replay ? `${result.trace.canonical_evidence_count ?? 0} current authorized passages checked` : `${result.trace.evidence_items_sent_to_model} canonical passages in context`],
-          ["Generation", result.trace.history_replay ? "Not rerun" : result.trace.generation_model ?? "Not required"],
+          ["Generation", result.trace.history_replay ? "Not rerun" : result.state === "VERIFIED_EVIDENCE" ? "Composed from verified evidence without a language model" : result.trace.generation_model ? "Model selection completed" : "Not required"],
           ["Citation validation", "Evidence IDs resolved to canonical source excerpts"],
         ].map(([label, value]) => <li key={label}><strong>{label}</strong><span>{value}</span></li>)}</ol>
         <dl className="source-facts">{Object.entries(result.trace.timing_ms).map(([key, value]) => <div key={key}><dt>{timingLabel(key)}</dt><dd>{typeof value === "number" ? `${Math.round(value)} ms` : "Not measured"}</dd></div>)}</dl>
@@ -879,7 +890,7 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
       <div className="ask-main"><div className="conversation-scroll" ref={scrollRef}>
       {messages.length ? <div className="message-thread" aria-live="polite">{messages.map((turn) => <div className="conversation-turn" key={turn.response.request_id}>
         <div className="question-bubble"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{turn.query}</p></div>
-        {turn.response.state === "SMALL_TALK" ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>Conversation helper · no company-data lookup</small></div></div> : turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className="answer-label">From your authorized sources</h2>
+        {(turn.response.state === "SMALL_TALK" || turn.response.state === "CLARIFICATION_NEEDED") ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>{turn.response.state === "SMALL_TALK" ? "Conversation helper · no company-data lookup" : "Please clarify · no factual answer released"}</small></div></div> : turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className="answer-label">From your authorized sources</h2>
         {turn.response.state === "VERIFIED_EVIDENCE" && <p className="response-secondary">{turn.response.message}</p>}
         {turn.response.claims.map((claim, index) => <p key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citation.citation_id}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citation.citation_id)}: ${citation.title ?? "Source"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citation.citation_id)}]</button>)}</p>)}
         <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
@@ -887,10 +898,10 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
         {turn.response.trace.history_saved === false && <p className="response-secondary">This answer could not be saved to history.</p>}
         </div></div>}
       </div>)}</div> : !pending && !error && <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="files" size={24} /></div><h2>What would you like to know?</h2><p>Find answers in contracts, scanned documents, and business records.</p><div className="question-examples" aria-label="Example questions">{exampleQuestions.map((example) => <button className="sample-question" type="button" key={example} onClick={() => setQuery(example)}><span>{example}</span><Icon name="arrow" size={17} /></button>)}</div></div>}
-      {(pending || error) && askedQuery && <div className="question-bubble pending-question"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{askedQuery}</p></div>}
+      {(pending || error) && askedQuery && !result && <div className="question-bubble pending-question"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{askedQuery}</p></div>}
       {pending && <div className="query-progress current-progress" role="status" aria-live="polite"><span className="progress-dot" aria-hidden="true" />{progressLabel[stage] ?? "Preparing the question"}</div>}
       {error && <div className="request-error" role="alert"><p>{error}</p><button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button></div>}
-      {error && retryEvidence.length > 0 && <details className="retry-evidence"><summary>Sources found before generation stopped</summary><p>Open a source to recheck your current access.</p>{retryEvidence.slice(0, 8).map((citation) => <button className="text-button" key={`${citation.citation_id}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{citation.title ?? "Authorized source"} · {formatLocation(citation.location)}</button>)}</details>}
+      {error && retryEvidence.length > 0 && <details className="retry-evidence"><summary>Sources found before generation stopped</summary><p>Open a source to recheck your current access.</p><div className="retry-source-list" role="region" aria-label="Sources available before generation stopped" tabIndex={0}>{retryEvidence.slice(0, 8).map((citation) => <button className="text-button" key={`${citation.citation_id}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{citation.title ?? "Authorized source"} · {formatLocation(citation.location)}</button>)}</div></details>}
       {result && !pending && <button className="trace-control text-button" type="button" onClick={onTrace}>View retrieval trace <Icon name="arrow" size={14} /></button>}
       </div>
       <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Waiting for a verified response" : ""}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Processing" : "Ask"}</span></button></div></form><p className="composer-policy">Answers use authorized source text and bounded business summaries. Open evidence to inspect the original; general semantic entailment is not verified.</p></div>
@@ -925,7 +936,7 @@ function SourcesView({ sources, canDelete, onDelete, notice, filter, onFilter, t
     {error && <p className="request-error" role="alert">{error}</p>}
     {notice && <p role="status" className="source-notice">{notice}</p>}
     <div className="sources-toolbar"><div className="sources-filters"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Search authorized names or IDs" /></label><label className="source-type-filter"><span className="sr-only">Filter by source type</span><select value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}><option value="all">All types</option><option value="pdf">PDF</option><option value="image_ocr">Image / OCR</option><option value="structured">Structured record</option></select></label><label className="source-type-filter"><span className="sr-only">Sort sources</span><select aria-label="Sort sources" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">Newest first</option><option value="name">Source name</option></select></label></div><p className="list-count">{sources.length} authorized {sources.length === 1 ? "source" : "sources"}</p></div>
-    {sources.length ? <div className="source-table-wrap"><table className="source-table knowledge-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th><th><span className="sr-only">Open source</span></th></tr></thead><tbody>{orderedSources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{typeof source.metadata.table === "string" ? source.metadata.table : "Protected source"}</small><button className="text-button mobile-source-open" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open source</button>{canDelete && <button className="text-button mobile-source-open danger-text" type="button" disabled={pending} onClick={() => onDelete(source)}>Delete source</button>}</td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><button className="text-button" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open</button>{canDelete && <button className="text-button danger-text" type="button" disabled={pending} onClick={() => onDelete(source)}>Delete</button>}</td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter || typeFilter !== "all" ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter || typeFilter !== "all" ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
+    {sources.length ? <div className="source-table-wrap source-list-scroll" role="region" aria-label="Authorized sources" tabIndex={0}><table className="source-table knowledge-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th><th><span className="sr-only">Open source</span></th></tr></thead><tbody>{orderedSources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{typeof source.metadata.table === "string" ? source.metadata.table : "Protected source"}</small><button className="text-button mobile-source-open" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open source</button>{canDelete && <button className="text-button mobile-source-open danger-text" type="button" disabled={pending} onClick={() => onDelete(source)}>Delete source</button>}</td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><button className="text-button" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open</button>{canDelete && <button className="text-button danger-text" type="button" disabled={pending} onClick={() => onDelete(source)}>Delete</button>}</td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter || typeFilter !== "all" ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter || typeFilter !== "all" ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
   </div>;
 }
 
@@ -973,20 +984,22 @@ function SecurityView({ data, pending, error, onRefresh }: { data: SecurityData 
     <ContextBand identity={data.identity.display_name} email={data.identity.email} role={data.active_role} verified />
     <section className="data-section"><SectionTitle title="Retrieval authorization boundary" /><div className="security-flow">{([{ label: "Identity", icon: "user", note: "Validated session" }, { label: "Authorization", icon: "lock", note: "Database policies" }, { label: "Secure retrieval", icon: "search", note: "Role-scoped matches" }, { label: "Authorized evidence", icon: "files", note: "Retrieved source rows" }, { label: "Generation", icon: "chat", note: "Answer generation" }] as const).map((step, index) => <div className={`security-step ${index === 1 ? "security-boundary" : ""}`} key={step.label}><Icon name={step.icon} size={19} /><strong>{step.label}</strong><span>{step.note}</span>{index < 4 && <Icon name="arrow" size={15} className="flow-arrow" />}</div>)}</div><p className="trace-disclaimer">Architectural design: retrieval uses the validated user or server-brokered demo-role session. Unauthorized evidence supplied to the model: not independently measured in this trace. The endpoint does not probe hosted RLS status.</p></section>
     <section className="data-section"><SectionTitle title="Effective access scope" /><p className="scope-copy"><Icon name="lock" size={15} />{data.effective_scope}</p><div className="security-checks">{Object.entries(data.security_tests).map(([label, value]) => <div key={label} className={label === "basis" ? "security-check-basis" : undefined} data-unverified={/not checked|not independently measured|not verified/.test(String(value)) || undefined}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></div>)}</div></section>
-    <section className="data-section"><SectionTitle title="Recent security activity" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count == null ? "Evidence count unmeasured for this action" : `${entry.authorized_evidence_count} authorized evidence items`} · unauthorized evidence supplied to the model: not independently measured</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question or inspect a source to record activity in this context.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Events persist in PostgreSQL and are visible only to the signed-in actor and current context. Unverified identities are not attributed to events.</p></section>
+    <section className="data-section"><SectionTitle title="Recent security activity" /><ol className="trace-list security-activity-scroll" role="list" aria-label="Recent security activity" tabIndex={0}>{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count == null ? "Evidence count unmeasured for this action" : `${entry.authorized_evidence_count} authorized evidence items`} · unauthorized evidence supplied to the model: not independently measured</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question or inspect a source to record activity in this context.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Events persist in PostgreSQL and are visible only to the signed-in actor and current context. Unverified identities are not attributed to events.</p></section>
   </div>;
 }
 
-function EvaluationView({ data, pending, error, role, onRefresh, onRun }: { data: EvaluationData | null; pending: boolean; error: string | null; role: string; onRefresh: () => void; onRun: () => void }) {
-  return <div className="data-page"><PageHeading title="Evaluation" description="Local synthetic smoke results for retrieval and authorization; not a production benchmark." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
-    {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : pending ? <p role="status">Loading evaluation state…</p> : <><h2>No evaluation run recorded</h2><p>Run the real retrieval suite to measure hit rate, ranking, modality coverage, and authorization boundaries.</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Checking evaluation…" : "Run evaluation"}</button>{role !== "CEO" && <small>Switch to the CEO access context to inspect or run the local test suite.</small>}</div> : <>
+function EvaluationView({ data, state, running, pending, error, role, onRefresh, onRun }: { data: EvaluationData | null; state: string; running: boolean; pending: boolean; error: string | null; role: string; onRefresh: () => void; onRun: () => void }) {
+  return <div className="data-page"><PageHeading title="Evaluation" description="Local synthetic smoke results for retrieval and authorization; not a production benchmark." action={<button className="quiet-button" type="button" disabled={pending} onClick={onRefresh}>Refresh</button>} />
+    {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : pending || state === "loading" ? <p role="status">{running ? "Running the synthetic retrieval suite…" : "Loading evaluation state…"}</p> : <><h2>{state === "restricted" ? "Evaluation requires the CEO context" : state === "unavailable" ? "Evaluation results are unavailable" : "No evaluation run recorded"}</h2><p>{state === "restricted" ? "Saved local runs are only available in the CEO access context." : state === "unavailable" ? "Refresh to try loading the saved run again." : "No saved local artifact is available. Run the retrieval suite to record actual synthetic results."}</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{running ? "Running evaluation…" : pending || state === "loading" ? "Loading evaluation…" : "Run evaluation"}</button>{role !== "CEO" && role !== "Loading" && <small>Switch to the CEO access context to inspect or run the local test suite.</small>}</div> : <>
       <div className="evaluation-scope"><p className="evaluation-run-label"><Icon name="chart" size={15} />{data.run_kind === "historical_legacy" ? "Historical saved run · legacy labels corrected; not rerun" : data.run_kind === "fresh_local" ? "Fresh local synthetic run" : "Recorded local synthetic run; not rerun on refresh"}</p><div className="evaluation-observations"><span>Checked authorization cases · {data.authorization_violations} forbidden hits</span><span>Retrieved citation locations · {String(data.measured_checks?.retrieved_citation_locations_present ?? "not measured")} / {String(data.measured_checks?.retrieved_citation_locations_checked ?? "not measured")} present</span><span>Mean latency · {formatLatency(data.measured_checks?.mean_latency_ms)}</span></div></div>
+      <p className="empty-note">{data.execution_origin === "app" ? "Executed from the app" : "Loaded from a local CLI or legacy artifact; not an app-executed run"}{data.completed_at ? ` · ${formatTime(data.completed_at)}` : " · Run time was not recorded"}{typeof data.duration_ms === "number" ? ` · ${(data.duration_ms / 1000).toFixed(1)} seconds` : ""}. {data.corpus ? `Corpus at start: ${data.corpus.documents} sources, ${data.corpus.knowledge_chunks} chunks, ${data.corpus.structured_records} typed records.` : "Corpus size was not recorded for this historical run."}</p>
       <div className="evaluation-summary"><div><span>Dataset</span><strong>{data.dataset}</strong></div><div><span>Queries</span><strong>{data.query_count}</strong></div><div><span>Hit rate@{data.top_k}</span><strong>{formatMetric(data.retrieval_hit_rate_at_k)}</strong></div><div><span>Mean reciprocal rank</span><strong>{formatMetric(data.mean_reciprocal_rank)}</strong></div><div><span>Checked forbidden hits</span><strong className={data.authorization_violations ? "metric-bad" : "metric-good"}>{data.authorization_violations}</strong></div></div>
       <p className="empty-note">Generation-dependent checks are not run by this retrieval suite. A real Ask answer, its citations and live injection resistance require separate verification; provider outages can block those checks.</p>
       <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong></td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
       <p className="trace-disclaimer">Retrieved with authenticated demo users against the local database. This small synthetic run measures retrieval and row-level authorization; hit rate means any expected source was found, not recall over all relevant sources. Citation-location presence does not verify answer provenance or entailment. It does not establish representative-scale quality or semantic answer quality.{data.completed_at ? ` Completed ${formatTime(data.completed_at)}.` : ""}</p>
+      {!!data.history?.length && <details className="evaluation-history"><summary>Previous saved runs ({data.history.length})</summary><ol>{data.history.map((run, index) => <li key={`${run.completed_at}-${index}`}>{run.completed_at ? formatTime(run.completed_at) : "Run time not recorded"} · {run.dataset ?? "Historical dataset"} · {run.query_count ?? "Unrecorded"} queries · {run.execution_origin === "app" ? "App run" : "CLI or legacy artifact"}</li>)}</ol></details>}
       {error && <p className="request-error" role="alert">{error}</p>}
-      <button className="quiet-button" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Running…" : "Run again"}</button>
+      <button className="quiet-button" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{running ? "Running…" : pending ? "Loading…" : "Run again"}</button>
     </>}
   </div>;
 }

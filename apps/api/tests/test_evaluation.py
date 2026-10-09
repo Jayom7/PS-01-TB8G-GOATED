@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import copy
+import json
 import runpy
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from ps01_api import main
 from ps01_api.main import evaluation_checks_passed, recorded_evaluation
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/evaluate_local_retrieval.py"
@@ -88,3 +95,102 @@ def test_zero_forbidden_hits_does_not_hide_a_retrieval_failure():
     )
     assert evaluation_checks_passed({"authorization_violations": 0, "results": [{"hit": True}]})
     assert not evaluation_checks_passed({"authorization_violations": 0, "results": []})
+
+
+@pytest.fixture
+def evaluation_env(tmp_path):
+    path = tmp_path / "evaluation.json"
+    identity = {"user_id": "actor", "organization_id": "org", "role": "CEO"}
+    with (
+        patch.object(main, "EVALUATION_RESULTS", path),
+        patch.object(main, "_local_demo_enabled", return_value=True),
+        patch.object(main, "require_session", AsyncMock(return_value="actor-token")),
+        patch.object(main, "_identity", AsyncMock(return_value=identity)),
+        patch.object(main, "_context_token", AsyncMock(return_value=("actor-token", "CEO"))),
+        patch.object(main, "require_local_ceo", AsyncMock(return_value=("actor-token", identity))),
+        patch.object(
+            main,
+            "_rest_rows",
+            AsyncMock(
+                return_value=httpx.Response(200, json=[], headers={"content-range": "0-0/18"})
+            ),
+        ),
+    ):
+        yield path
+
+
+def test_empty_recorded_and_corrupt_evaluation_states(evaluation_env):
+    client = TestClient(main.app)
+    assert client.get("/api/v1/evaluation").json() == {"state": "not_run", "result": None}
+    evaluation_env.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "results": [],
+                "completed_at": "2026-10-09T00:00:00Z",
+                "query_count": 6,
+            }
+        )
+    )
+    result = client.get("/api/v1/evaluation").json()["result"]
+    assert result["run_kind"] == "recorded_local"
+    assert result["completed_at"] == "2026-10-09T00:00:00Z"
+    assert "execution_origin" not in result  # Never invent app provenance for CLI artifacts.
+    evaluation_env.write_text("broken")
+    assert client.get("/api/v1/evaluation").json()["state"] == "unavailable"
+
+
+def test_run_persists_real_workflow_return_and_archives_previous(evaluation_env):
+    prior = {
+        "schema_version": 2,
+        "dataset": "prior",
+        "query_count": 6,
+        "completed_at": "2026-10-08T00:00:00Z",
+        "results": [],
+    }
+    evaluation_env.write_text(json.dumps(prior))
+    run = AsyncMock(
+        return_value={"schema_version": 2, "dataset": "new", "query_count": 6, "results": []}
+    )
+    with patch.object(main.runpy, "run_path", return_value={"run": run}):
+        response = TestClient(main.app).post("/api/v1/evaluation/run")
+    assert response.status_code == 200
+    run.assert_awaited_once()
+    saved = json.loads(evaluation_env.read_text())
+    assert saved["execution_origin"] == "app"
+    assert saved["completed_at"] and saved["duration_ms"] >= 0
+    assert saved["corpus"]["documents"] == 18
+    assert evaluation_env.stat().st_mode & 0o777 == 0o600
+    archives = list(evaluation_env.parent.glob("evaluation-history-*.json"))
+    assert len(archives) == 1 and json.loads(archives[0].read_text()) == prior
+    refreshed = TestClient(main.app).get("/api/v1/evaluation").json()["result"]
+    assert refreshed["run_id"] == saved["run_id"] and refreshed["run_kind"] == "recorded_local"
+    assert refreshed["history"][0]["completed_at"] == prior["completed_at"]
+
+
+def test_failed_run_keeps_previous_artifact(evaluation_env):
+    original = '{"schema_version":2,"results":[]}'
+    evaluation_env.write_text(original)
+    with patch.object(
+        main.runpy, "run_path", return_value={"run": AsyncMock(side_effect=RuntimeError("failed"))}
+    ):
+        response = TestClient(main.app).post("/api/v1/evaluation/run")
+    assert response.status_code == 503
+    assert evaluation_env.read_text() == original
+
+
+def test_restricted_context_does_not_read_saved_metrics(evaluation_env):
+    evaluation_env.write_text('{"results":[],"secret":"not visible"}')
+    with patch.object(main, "_context_token", AsyncMock(return_value=("hr-token", "HR Manager"))):
+        response = TestClient(main.app).get("/api/v1/evaluation")
+    assert response.json() == {"state": "restricted", "result": None}
+
+
+def test_second_run_during_evaluation_is_rejected(evaluation_env):
+    with (
+        patch.object(main.EVALUATION_LOCK, "locked", return_value=True),
+        patch.object(main.runpy, "run_path") as run,
+    ):
+        response = TestClient(main.app).post("/api/v1/evaluation/run")
+    assert response.status_code == 409
+    run.assert_not_called()

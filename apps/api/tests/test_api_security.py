@@ -176,7 +176,8 @@ class TestApiSecurity:
 
         assert response.status_code == 503
         body = response.json()
-        assert body["detail"] == "The answer service took too long to respond. Please try again."
+        assert "took too long" in body["detail"]
+        assert "access permissions remain in place" in body["detail"]
         assert body["code"] == "provider_timeout"
         assert body["timing_ms"]["gemini_ms"] >= 0
         assert body["timing_ms"]["total_ms"] >= body["timing_ms"]["gemini_ms"]
@@ -218,7 +219,8 @@ class TestApiSecurity:
 
         assert response.status_code == 429
         assert response.json()["code"] == "provider_rate_limited"
-        assert "rate-limited" in response.json()["detail"]
+        assert "Please try again shortly" in response.json()["detail"]
+        assert "rate-limited" not in response.json()["detail"]
 
     def test_non_ceo_cannot_forge_a_ceo_context_header(self) -> None:
         with (

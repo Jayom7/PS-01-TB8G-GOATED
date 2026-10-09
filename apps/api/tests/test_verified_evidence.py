@@ -263,3 +263,143 @@ def test_synthetic_guard_allows_verified_deletion_subset_but_no_unknown_hash_or_
     assert not module.synthetic_corpus_is_bound([doc, doc], {"file": "hash"})
     assert not module.synthetic_corpus_is_bound([doc], {"file": "different"})
     assert not module.synthetic_corpus_is_bound([doc], {"unknown": "hash"})
+
+
+@pytest.mark.parametrize("question", ["hi", "hello", "good morning", "What can you do?", "thanks"])
+def test_conversation_helper_never_embeds_or_generates(question):
+    generator = AsyncMock()
+    with (
+        query_patches([], generator),
+        patch("ps01_api.main.create_embedding", AsyncMock()) as embed,
+    ):
+        response = TestClient(app).post(
+            "/api/v1/chat/query", headers=HEADERS, json={"query": question}
+        )
+    assert response.json()["state"] == "SMALL_TALK"
+    assert response.json()["claims"] == []
+    generator.assert_not_awaited()
+    embed.assert_not_awaited()
+
+
+def test_imperfect_wording_uses_repaired_query_with_exact_original_id():
+    generator = AsyncMock(side_effect=IntegrationFailure("outage", code="provider_unavailable"))
+    with (
+        query_patches([SCAN], generator),
+        patch("ps01_api.main.create_embedding", AsyncMock(return_value=[0] * 1536)) as embed,
+    ):
+        response = TestClient(app).post(
+            "/api/v1/chat/query",
+            headers=HEADERS,
+            json={"query": "whats the scanned invocie INV-1001 ammount pls?"},
+        )
+    assert response.json()["state"] == "VERIFIED_EVIDENCE"
+    assert "INV-1001" in embed.await_args.args[2]
+    assert "invoice" in embed.await_args.args[2]
+    assert "USD 100.00" in response.json()["claims"][0]["text"]
+
+
+def test_ambiguous_current_invoices_request_clarification_without_generation():
+    other = {
+        **SCAN,
+        "chunk_id": SECOND,
+        "document_id": SECOND,
+        "source_id": "INV-1002",
+        "content": "Invoice INV-1002 total USD 200.00",
+    }
+    generator = AsyncMock()
+    with query_patches([SCAN, other], generator):
+        response = TestClient(app).post(
+            "/api/v1/chat/query", headers=HEADERS, json={"query": "What is the invoice amount?"}
+        )
+    assert response.json()["state"] == "CLARIFICATION_NEEDED"
+    assert response.json()["claims"] == []
+    assert "100.00" not in response.text and "200.00" not in response.text
+    generator.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "rows,expected",
+    [
+        ([{"content": "Invoice INV-1001 total USD 100.00"}], "INV-1001"),
+        ([], None),
+        ([{"content": "Invoice INV-1001 and INV-1002"}], None),
+    ],
+)
+def test_followup_resolution_uses_only_current_referents(rows, expected):
+    from ps01_api.rag import interpret_followup
+
+    query, message = interpret_followup("Is it paid?", rows)
+    if expected:
+        assert expected in query and message is None
+    else:
+        assert message and "Which invoice" in message
+        assert "INV-" not in message
+
+
+def test_followup_with_no_fact_asks_what_user_wants_to_know():
+    from ps01_api.rag import interpret_followup, normalize_question
+
+    _, message = interpret_followup("What about the invoice?", [{"content": "Invoice INV-1001"}])
+    assert "What would you like to know" in message
+    assert normalize_question("PLS-INV-1001") == "PLS-INV-1001"
+    assert normalize_question("INV-1001") == "INV-1001"
+    assert normalize_question("INV-100l") == "INV-100l"
+
+
+async def test_referent_read_is_current_rls_scoped_and_ignores_saved_text():
+    from ps01_api import main
+
+    saved = [
+        {
+            "response": {
+                "message": "Invoice INV-9999 is paid",
+                "claims": [{"text": "Invoice INV-9999", "citations": [{"citation_id": ID}]}],
+            }
+        }
+    ]
+    with patch(
+        "ps01_api.main._rest_rows",
+        AsyncMock(return_value=__import__("httpx").Response(200, json=[])),
+    ) as rest:
+        current = await main._recent_referents(None, None, "current-role-token", saved)
+    assert current == []
+    assert rest.await_args.args[2] == "current-role-token"
+    assert ID in rest.await_args.kwargs["params"]["id"]
+
+
+@pytest.mark.parametrize("query", ["INV-100l amount?", "Is ACM-INV-20O8 paid?"])
+def test_malformed_invoice_id_is_not_resolved_from_history(query):
+    from ps01_api.rag import interpret_followup
+
+    effective, message = interpret_followup(query, [SCAN])
+    assert effective == query
+    assert message == "Please check the invoice ID and ask again."
+    assert "INV-1001" not in effective
+
+
+@pytest.mark.parametrize("query", ["Hi there!", "Hello there", "helo", "How are you?"])
+def test_informal_greetings_are_exact_helpers(query):
+    assert small_talk(query)
+    assert small_talk(query + " What is invoice INV-1001 total?") is None
+
+
+def test_explicit_new_invoice_never_inherits_previous_referent():
+    from ps01_api.rag import interpret_followup
+
+    query = "What is invoice INV-2002 amount?"
+    effective, message = interpret_followup(query, [SCAN])
+    assert effective == query and message is None
+
+
+async def test_typed_referent_does_not_expand_to_other_invoices_in_shared_document():
+    from ps01_api import main
+
+    saved = [{"response": {"claims": [{"citations": [{"citation_id": ID}]}]}}]
+    row = {"id": ID, "row_id": "INV-1001", "document_id": SECOND, "content": "Invoice INV-1001"}
+    with patch(
+        "ps01_api.main._rest_rows",
+        AsyncMock(return_value=__import__("httpx").Response(200, json=[row])),
+    ) as rest:
+        current = await main._recent_referents(None, None, "current-token", saved)
+    assert current == [row]
+    rest.assert_awaited_once()

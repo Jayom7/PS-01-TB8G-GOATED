@@ -122,11 +122,14 @@ async def verify():
                         for key in ("document_count", "chunk_count", "structured_record_count")
                     }
 
-                async def ask(query, headers=finance, stream=False):
+                async def ask(query, headers=finance, stream=False, conversation=None):
                     response = await api.post(
                         "/api/v1/chat/stream" if stream else "/api/v1/chat/query",
                         headers=headers,
-                        json={"query": query},
+                        json={
+                            "query": query,
+                            **({"conversation_id": conversation} if conversation else {}),
+                        },
                     )
                     response.raise_for_status()
                     if stream:
@@ -203,6 +206,38 @@ async def verify():
                     check(
                         "Every outbound selection ID in Finance RLS set",
                         all(ids <= {r["id"] for r in allowed.json()} for ids in outage.attempt_ids),
+                    )
+                    followup_id = result["conversation_id"]
+                    attempts_before_followup = len(outage.attempt_ids)
+                    followup = await ask("Is it paid?", conversation=followup_id)
+                    check(
+                        "Conversational reference uses fresh authorized invoice evidence",
+                        followup["state"] == "VERIFIED_EVIDENCE"
+                        and any("unpaid" in claim["text"] for claim in followup["claims"]),
+                    )
+                    check(
+                        "Outage cooldown avoids another generation call",
+                        len(outage.attempt_ids) == attempts_before_followup,
+                    )
+                    clarify = await ask("What about the invoice?", conversation=followup_id)
+                    check(
+                        "Vague follow-up asks for the requested fact",
+                        clarify["state"] == "CLARIFICATION_NEEDED" and not clarify["claims"],
+                    )
+                    foreign = await api.post(
+                        "/api/v1/chat/query",
+                        headers=hr,
+                        json={"query": "Is it paid?", "conversation_id": followup_id},
+                    )
+                    check(
+                        "HR cannot use a Finance conversation as a referent",
+                        foreign.status_code == 404,
+                    )
+                    typo = await ask("whats the scanned Acme invocie ammount pls?")
+                    check(
+                        "Finite spelling repair retains exact cited facts",
+                        typo["state"] == "VERIFIED_EVIDENCE"
+                        and any("48,000" in claim["text"] for claim in typo["claims"]),
                     )
                     attempts = len(outage.attempt_ids)
                     denied = await ask(cases[0], hr)

@@ -517,7 +517,11 @@ svg { flex-shrink: 0; }
 .conversation-history small { color: var(--faint); font-size: 10px; }
 .history-remove { padding: 14px 4px; border: 0; background: transparent; color: var(--muted); }
 .conversation-turn { display: grid; gap: 24px; }
-.pending-question { margin: 24px 0; }
+.question-bubble { justify-self: end; width: fit-content; max-width: min(85%, 70ch); grid-template-columns: minmax(0, 1fr) 32px; margin-left: auto; }
+.question-bubble .user-avatar { grid-column: 2; grid-row: 1; }
+.question-bubble p { grid-column: 1; grid-row: 1; overflow-wrap: anywhere; }
+.answer-block, .preview-response { justify-self: start; width: 100%; min-width: 0; }
+.pending-question { margin: 24px 0 24px auto; }
 .query-progress { list-style: none; margin: 24px 0 24px 48px; padding: 0; display: grid; gap: 12px; font-size: 13px; }
 .query-progress li { display: flex; gap: 10px; align-items: center; color: var(--faint); }
 .query-progress li[data-state="active"] { color: var(--ink); font-weight: 500; }
@@ -605,7 +609,18 @@ svg { flex-shrink: 0; }
 @media (prefers-reduced-motion: reduce) { .progress-dot { animation: none; } }
 .retry-evidence { margin: 16px 0; color: var(--muted); font-size: 13px; }
 .retry-evidence summary { cursor: pointer; color: var(--ink); }
-.retry-evidence button { display: block; margin: 8px 0; text-align: left; }
+.retry-evidence button { display: block; max-width: 100%; margin: 8px 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.retry-source-list { max-height: min(30dvh, 240px); overflow-y: auto; padding: 4px; }
+.source-list-scroll { max-height: min(65dvh, 640px); scroll-padding-top: 48px; }
+.source-list-scroll th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+.security-activity-scroll { max-height: min(55dvh, 480px); overflow-y: auto; padding-right: var(--space-3); }
+.retry-source-list, .source-list-scroll, .security-activity-scroll { scrollbar-color: var(--line-strong) var(--surface); scrollbar-width: thin; }
+.evaluation-history { color: var(--muted); font-size: var(--type-ui); margin-block: var(--space-4); }
+.evaluation-history ol { padding-left: var(--space-5); line-height: 1.8; }
+@media (max-width: 720px) {
+  .question-bubble { max-width: 92%; grid-template-columns: minmax(0, 1fr) 26px; }
+  .source-list-scroll { max-height: 60dvh; }
+}
 .primary-navigation { flex: 1; min-height: 0; overflow-y: auto; align-content: start; }
 .rail-footer { flex-shrink: 0; }
 @media (max-height: 600px) { .rail-security-note { display: none; } .navigation-rail { padding-top: 12px; } .account-popover { max-height: calc(100dvh - 125px); overflow-y: auto; } }

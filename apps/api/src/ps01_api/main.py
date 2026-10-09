@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import runpy
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -37,8 +38,11 @@ from .integrations import (
     verify_supabase_session,
 )
 from .rag import (
+    ambiguous_invoice,
     citation_from_row,
     insufficient_evidence,
+    interpret_followup,
+    normalize_question,
     prepare_generation_context,
     relevant_passage,
     small_talk,
@@ -52,6 +56,7 @@ LOGGER = logging.getLogger("ps01_api")
 DEMO_CREDENTIALS = REPOSITORY_ROOT / ".local-demo-credentials.json"
 DEMO_ROLES = ("CEO", "Finance Manager", "HR Manager", "Sales Manager", "Engineer")
 EVALUATION_RESULTS = REPOSITORY_ROOT / "data" / "local" / "evaluation.json"
+EVALUATION_LOCK = asyncio.Lock()
 PRIVATE_INGESTION = REPOSITORY_ROOT / "data" / "private" / "ingest"
 
 
@@ -99,21 +104,32 @@ app.add_middleware(
 async def integration_failure_handler(_request: Request, exc: IntegrationFailure):
     LOGGER.warning("Integration failure [%s]: %s", exc.code, exc)
     messages = {
-        "provider_unavailable": "Answer generation is temporarily unavailable. Try again shortly.",
-        "provider_rate_limited": (
-            "Answer generation is rate-limited. Your retrieved evidence remains protected; "
-            "retry later."
+        "provider_unavailable": (
+            "I couldn’t complete that answer just now. Your access permissions "
+            "remain in place. Please try again shortly."
         ),
-        "provider_timeout": "The answer service took too long to respond. Please try again.",
+        "provider_rate_limited": (
+            "I couldn’t complete that answer just now. Your access permissions "
+            "remain in place. Please try again shortly."
+        ),
+        "provider_timeout": (
+            "The answer took too long to complete. Your access permissions remain in "
+            "place. Please try again shortly."
+        ),
         "provider_invalid_response": (
             "The answer service returned an unusable response. Please retry."
         ),
         "retrieval_unavailable": "Authorized search is unavailable. No answer was generated.",
         "provider_authentication_failed": (
-            "The provider rejected its configuration. Contact the workspace administrator."
+            "The answer service needs attention. Please contact your workspace administrator."
         ),
-        "provider_invalid_model": "No configured generation model is available to this account.",
-        "provider_invalid_request": "The provider rejected the generation request.",
+        "provider_invalid_model": (
+            "The answer service needs attention. Please contact your workspace administrator."
+        ),
+        "provider_invalid_request": (
+            "I couldn’t complete that answer. Please rephrase your question or "
+            "contact your workspace administrator."
+        ),
         "provider_safety_block": "The provider declined this request. No answer was released.",
         "session_expired": "Your session expired. Sign in again to continue.",
         "authorization_denied": "Your current access does not permit this action.",
@@ -147,6 +163,13 @@ async def integration_failure_handler(_request: Request, exc: IntegrationFailure
         content["provider_status"] = exc.provider_status
     if exc.model_attempts:
         content["generation_attempts"] = exc.model_attempts
+    LOGGER.warning(
+        "Provider diagnostics code=%s status=%s retry_seconds=%s attempts=%s",
+        exc.code,
+        exc.provider_status,
+        exc.retry_after,
+        json.dumps(exc.model_attempts),
+    )
     statuses = {
         "provider_rate_limited": 429,
         "session_expired": 401,
@@ -642,7 +665,12 @@ async def get_evaluation(
             result = json.loads(EVALUATION_RESULTS.read_text())
             if not isinstance(result, dict):
                 return {"state": "unavailable", "result": None}
-            return {"state": "completed", "result": recorded_evaluation(result)}
+            if not isinstance(result.get("results"), list):
+                return {"state": "unavailable", "result": None}
+            return {
+                "state": "completed",
+                "result": recorded_evaluation(result) | {"history": evaluation_history()},
+            }
         except (OSError, ValueError):
             return {"state": "unavailable", "result": None}
     return {"state": "not_run", "result": None}
@@ -675,6 +703,46 @@ def recorded_evaluation(result: dict[str, object]) -> dict[str, object]:
             checks[new] = checks.pop(old)
     saved["measured_checks"] = checks
     return saved
+
+
+def evaluation_history():
+    history = []
+    for path in sorted(EVALUATION_RESULTS.parent.glob("evaluation-history-*.json"), reverse=True)[
+        :10
+    ]:
+        try:
+            saved = json.loads(path.read_text())
+            if not isinstance(saved, dict) or not isinstance(saved.get("results"), list):
+                continue
+            history.append(
+                {
+                    key: saved.get(key)
+                    for key in (
+                        "completed_at",
+                        "dataset",
+                        "query_count",
+                        "execution_origin",
+                        "run_id",
+                    )
+                }
+            )
+        except (OSError, ValueError):
+            continue
+    return history
+
+
+def _atomic_evaluation_write(path, contents):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(contents)
+            stream.flush()
+        temporary.replace(path)
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
 
 
 class DemoSwitchRequest(BaseModel):
@@ -1028,26 +1096,59 @@ async def run_evaluation(
     if not _local_demo_enabled():
         raise HTTPException(status_code=404, detail="Local evaluation is unavailable")
     async with request_client() as client:
-        await require_local_ceo(client, authorization, demo_role)
-    try:
-        module = runpy.run_path(
-            str(REPOSITORY_ROOT / "apps" / "api" / "scripts" / "evaluate_local_retrieval.py")
+        token, identity = await require_local_ceo(client, authorization, demo_role)
+    if EVALUATION_LOCK.locked():
+        raise HTTPException(
+            status_code=409, detail="An evaluation is already running. Refresh shortly."
         )
-        result = await module["run"]()
-        result["completed_at"] = datetime.now(UTC).isoformat()
-        EVALUATION_RESULTS.parent.mkdir(parents=True, exist_ok=True)
-        if EVALUATION_RESULTS.is_file():
-            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-            archive = EVALUATION_RESULTS.with_name(f"evaluation-history-{stamp}.json")
-            archive.write_bytes(EVALUATION_RESULTS.read_bytes())
-            archive.chmod(0o600)
-        EVALUATION_RESULTS.write_text(json.dumps(result, indent=2) + "\n")
-        EVALUATION_RESULTS.chmod(0o600)
+    try:
+        async with EVALUATION_LOCK:
+            started = time.perf_counter()
+            async with request_client() as client:
+                counts = {}
+                for table in ("documents", "knowledge_chunks", "structured_records"):
+                    response = await _rest_rows(
+                        client,
+                        get_settings(),
+                        token,
+                        table,
+                        params={
+                            "select": "row_id" if table == "structured_records" else "id",
+                            "limit": "1",
+                            "organization_id": f"eq.{identity['organization_id']}",
+                        },
+                        headers={"Prefer": "count=exact"},
+                    )
+                    counts[table] = int(response.headers["content-range"].rsplit("/", 1)[-1])
+            module = runpy.run_path(
+                str(REPOSITORY_ROOT / "apps" / "api" / "scripts" / "evaluate_local_retrieval.py")
+            )
+            async with asyncio.timeout(120):
+                result = await module["run"]()
+            result.update(
+                {
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "execution_origin": "app",
+                    "run_id": str(uuid4()),
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "corpus": counts,
+                }
+            )
+            if EVALUATION_RESULTS.is_file():
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+                archive = EVALUATION_RESULTS.with_name(f"evaluation-history-{stamp}.json")
+                _atomic_evaluation_write(archive, EVALUATION_RESULTS.read_bytes())
+            _atomic_evaluation_write(
+                EVALUATION_RESULTS, (json.dumps(result, indent=2) + "\n").encode()
+            )
     except Exception as exc:
         raise HTTPException(
             status_code=503, detail="Evaluation failed; no result was saved"
         ) from exc
-    return {"state": "completed", "result": result | {"run_kind": "fresh_local"}}
+    return {
+        "state": "completed",
+        "result": result | {"run_kind": "fresh_local", "history": evaluation_history()},
+    }
 
 
 @app.post("/api/v1/chat/query", response_model=QueryResponse, tags=["chat"])
@@ -1111,6 +1212,8 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
     provider_failure = None
     sent_evidence_count = 0
     final_access_checked = False
+    effective_query = normalize_question(request.query)
+    clarification = None
     request_started = verified[3] if verified else time.perf_counter()
     preliminary_auth_ms = (time.perf_counter() - request_started) * 1000 if verified else 0
     timings: dict[str, float | None] = {
@@ -1135,6 +1238,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                     access_token, active_role = await _context_token(
                         client, settings, actor_token, identity, demo_role
                     )
+                rows = []
                 if request.conversation_id:
                     rows = await _history_rows(
                         client,
@@ -1179,16 +1283,41 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                     (time.perf_counter() - request_started) * 1000, 1
                 )
                 return response
+            effective_query, clarification = interpret_followup(request.query, [])
+            if clarification and rows:
+                recent = await _recent_referents(client, settings, access_token, rows)
+                effective_query, clarification = interpret_followup(request.query, recent)
+            if clarification:
+                response = QueryResponse(
+                    request_id=request_id,
+                    conversation_id=str(request.conversation_id or uuid4()),
+                    state="CLARIFICATION_NEEDED",
+                    message=clarification,
+                    claims=[],
+                    trace={
+                        "active_role": active_role,
+                        "session_verified": True,
+                        "database_request_used_user_session": True,
+                        "evidence_items_sent_to_model": 0,
+                        "generation_model": None,
+                        "fallback_used": False,
+                        "timing_ms": timings,
+                    },
+                )
+                response.trace["history_saved"] = await _save_history(
+                    actor_token, identity, active_role, request.query, response
+                )
+                return response
             await progress("searching_knowledge")
             embedding_started = time.perf_counter()
             try:
-                embedding = await create_embedding(client, settings, request.query)
+                embedding = await create_embedding(client, settings, effective_query)
             finally:
                 timings["embedding_ms"] = round((time.perf_counter() - embedding_started) * 1000, 1)
             retrieval_started = time.perf_counter()
             try:
                 evidence = await retrieve_chunks(
-                    client, settings, access_token, request.query, embedding
+                    client, settings, access_token, effective_query, embedding
                 )
             finally:
                 timings["retrieval_and_ranking_ms"] = round(
@@ -1201,9 +1330,14 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             timings["evidence_revalidation_ms"] = round(
                 (time.perf_counter() - recheck_started) * 1000, 1
             )
-            prompt, model_context = prepare_generation_context(request.query, evidence)
-            if not model_context or not any(
-                relevant_passage(request.query, row) for row in model_context
+            prompt, model_context = prepare_generation_context(effective_query, evidence)
+            if ambiguous_invoice(effective_query, evidence):
+                clarification = "Which invoice do you mean? Please include its invoice ID."
+                result = {"state": "CLARIFICATION_NEEDED", "message": clarification, "claims": []}
+                model_context = []
+                generation_model = None
+            elif not model_context or not any(
+                relevant_passage(effective_query, row) for row in model_context
             ):
                 result = insufficient_evidence()
                 model_context: list[dict[str, object]] = []
@@ -1230,8 +1364,10 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                     async def before_attempt():
                         nonlocal model_context, sent_evidence_count
                         fresh = await current_evidence()
-                        new_prompt, model_context = prepare_generation_context(request.query, fresh)
-                        if not any(relevant_passage(request.query, row) for row in model_context):
+                        new_prompt, model_context = prepare_generation_context(
+                            effective_query, fresh
+                        )
+                        if not any(relevant_passage(effective_query, row) for row in model_context):
                             raise IntegrationFailure(
                                 "Evidence changed before generation", code="evidence_changed"
                             )
@@ -1264,7 +1400,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 await progress("checking_final_access")
                 final_started = time.perf_counter()
                 fresh = await current_evidence()
-                _, model_context = prepare_generation_context(request.query, fresh)
+                _, model_context = prepare_generation_context(effective_query, fresh)
                 final_access_checked = True
                 timings["final_evidence_revalidation_ms"] = round(
                     (time.perf_counter() - final_started) * 1000, 1
@@ -1275,7 +1411,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 validation_started = time.perf_counter()
                 try:
                     if provider_failure:
-                        result = verified_evidence_response(request.query, model_context)
+                        result = verified_evidence_response(effective_query, model_context)
                         if not result["claims"]:
                             # Keep the precise provider error when safe extraction
                             # cannot support a complete answer.
@@ -1340,20 +1476,12 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
         conversation_id=conversation_id,
         state=result["state"],
         message=(
-            "Verified evidence response: composed without a language model because "
-            + {
-                "provider_unavailable": "the model provider is unavailable.",
-                "provider_timeout": "the model provider timed out.",
-                "provider_rate_limited": "the model provider is rate-limited.",
-            }[provider_failure.code]
-            + " Open citations to inspect the sources."
-            + (
-                f" Retry model generation after {provider_failure.retry_after} seconds."
-                if provider_failure.retry_after
-                else ""
+            (
+                "Verified evidence response: composed from your sources without a "
+                "language model. Open citations to inspect the evidence."
             )
             if provider_failure
-            else None
+            else clarification
         ),
         claims=result["claims"],
         trace={
@@ -1822,6 +1950,61 @@ async def _history_rows(client, settings, token, identity, role, conversation_id
     return list(reversed(response.json()))
 
 
+async def _recent_referents(client, settings, token, turns):
+    # Prior prose/trace is never factual context. Only a recent cited source
+    # pointer is used, then read again under the current actor's RLS session.
+    for turn in reversed(turns[-5:]):
+        saved = turn.get("response") or {}
+        ids = []
+        claims = saved.get("claims", []) if isinstance(saved, dict) else []
+        for claim in claims if isinstance(claims, list) else []:
+            if not isinstance(claim, dict):
+                continue
+            citations = claim.get("citations", [])
+            for citation in citations if isinstance(citations, list) else []:
+                try:
+                    ids.append(str(UUID(citation["citation_id"])))
+                except (ValueError, TypeError, KeyError):
+                    continue
+        ids = list(dict.fromkeys(ids))[:24]
+        if not ids:
+            continue
+        visible = await _rest_rows(
+            client,
+            settings,
+            token,
+            "knowledge_chunks",
+            params={
+                "id": f"in.({','.join(ids)})",
+                "select": "id,content,row_id,document_id",
+                "limit": "24",
+            },
+        )
+        current = visible.json()
+        document_ids = list(
+            dict.fromkeys(
+                row["document_id"]
+                for row in current
+                if row.get("document_id") and not row.get("row_id")
+            )
+        )
+        if document_ids:
+            siblings = await _rest_rows(
+                client,
+                settings,
+                token,
+                "knowledge_chunks",
+                params={
+                    "document_id": f"in.({','.join(document_ids)})",
+                    "select": "id,content,row_id,document_id",
+                    "limit": "100",
+                },
+            )
+            current += [row for row in siblings.json() if row["id"] not in ids]
+        return current
+    return []
+
+
 async def _save_history(token, identity, role, query, response):
     settings = get_settings()
     try:
@@ -1886,7 +2069,11 @@ async def conversation(
         rows = await _history_rows(client, settings, token, identity, role, str(conversation_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        for row in rows:
+        for turn_index, row in enumerate(rows):
+            replay_query, clarification = interpret_followup(row["query"], [])
+            if clarification and turn_index:
+                recent = await _recent_referents(client, settings, scoped_token, rows[:turn_index])
+                replay_query, clarification = interpret_followup(row["query"], recent)
             saved = row.get("response")
             saved = saved if isinstance(saved, dict) else {}
             claims = saved.get("claims")
@@ -1956,13 +2143,13 @@ async def conversation(
                     )
                     current += [item for item in siblings.json() if item["id"] not in ids]
             _, canonical = prepare_generation_context(
-                row["query"], [{**item, "chunk_id": item["id"]} for item in current]
+                replay_query, [{**item, "chunk_id": item["id"]} for item in current]
             )
             rebuilt = validate_generation({"claims": references}, canonical)
             if saved.get("state") == "VERIFIED_EVIDENCE":
                 # The saved mode/text is not proof of a provider failure. Re-run
                 # the deterministic extractor on currently visible references.
-                rebuilt = verified_evidence_response(row["query"], canonical)
+                rebuilt = verified_evidence_response(replay_query, canonical)
                 rebuilt["message"] = (
                     "Verified evidence response: reconstructed without a language model. "
                     "History replay did not rerun provider availability."
@@ -1970,6 +2157,13 @@ async def conversation(
             greeting = small_talk(row["query"])
             if greeting:
                 rebuilt = {"state": "SMALL_TALK", "claims": [], "message": greeting}
+            elif clarification or saved.get("state") == "CLARIFICATION_NEEDED":
+                rebuilt = {
+                    "state": "CLARIFICATION_NEEDED",
+                    "claims": [],
+                    "message": clarification
+                    or "Which invoice do you mean? Please include its invoice ID.",
+                }
             row["response"] = {
                 "request_id": row.get("id", str(uuid4())),
                 "conversation_id": str(conversation_id),

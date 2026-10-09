@@ -203,9 +203,10 @@ def inventory():
 
 @pytest.fixture(autouse=True)
 def clear_inventory():
-    from ps01_api.integrations import _MODEL_INVENTORY
+    from ps01_api.integrations import _GENERATION_CIRCUITS, _MODEL_INVENTORY
 
     _MODEL_INVENTORY.clear()
+    _GENERATION_CIRCUITS.clear()
 
 
 @pytest.mark.parametrize(
@@ -393,3 +394,194 @@ async def test_inventory_excluded_primary_reports_actual_fallback():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, settings(), "Answer")
     assert output["_fallback_used"] is True
+
+
+@pytest.mark.parametrize("status", [408, 500, 502, 503, 504, 507])
+async def test_transient_status_uses_only_one_configured_fallback(status):
+    calls = []
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request.url.path)
+        if len(calls) == 1:
+            return httpx.Response(status, headers={"Retry-After": "46080"})
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        output = await generate_claims(client, settings(), "Question")
+    assert len(calls) == 2
+    assert output["_model"] == "gemini-3.7-flash"
+    first = output["_attempts"][0]
+    assert first["provider_status"] == status
+    assert first["code"] == ("provider_timeout" if status in {408, 504} else "provider_unavailable")
+
+
+async def test_network_failure_uses_fallback():
+    calls = []
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(True)
+        if len(calls) == 1:
+            raise httpx.ConnectError("unavailable")
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        output = await generate_claims(client, settings(), "Question")
+    assert len(calls) == 2
+    assert output["_attempts"][0]["code"] == "provider_unavailable"
+
+
+async def test_cooldown_skips_repeated_outages_and_recovers_with_one_probe():
+    import time
+
+    from ps01_api.integrations import _GENERATION_CIRCUITS, IntegrationFailure
+
+    calls, available = [], False
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request.url.path)
+        if not available:
+            return httpx.Response(503, headers={"Retry-After": "46080"})
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]}
+        )
+
+    config = settings()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(4):
+            with pytest.raises(IntegrationFailure) as error:
+                await generate_claims(client, config, "Question")
+            assert error.value.code == "provider_unavailable"
+            assert error.value.provider_status == 503
+        assert len(calls) == 2
+        assert all(c.until <= time.monotonic() + 120 for c in _GENERATION_CIRCUITS.values())
+        available = True
+        for circuit in _GENERATION_CIRCUITS.values():
+            circuit.until = time.monotonic() - 1
+        output = await generate_claims(client, config, "Question")
+    assert output["_model"] == "gemini-3.8-flash"
+    assert len(calls) == 3
+
+
+async def test_shared_quota_cooldown_is_credential_scoped():
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(True)
+        return httpx.Response(429, json={"error": {"details": [{"retryDelay": "46080s"}]}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(3):
+            with pytest.raises(IntegrationFailure) as error:
+                await generate_claims(client, settings(), "Question")
+            assert error.value.code == "provider_rate_limited"
+        assert len(calls) == 1
+        other = settings()
+        other.gemini_api_key = SecretStr("another-test-key")
+        with pytest.raises(IntegrationFailure):
+            await generate_claims(client, other, "Question")
+        assert len(calls) == 2
+
+
+async def test_concurrent_requests_and_half_open_probes_are_bounded():
+    import asyncio
+    import time
+
+    from ps01_api.integrations import _GENERATION_CIRCUITS, IntegrationFailure
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request.url.path)
+        if "3.8" in request.url.path:
+            entered.set()
+            await release.wait()
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        first = asyncio.create_task(generate_claims(client, settings(), "Question"))
+        await entered.wait()
+        for _ in range(3):
+            with pytest.raises(IntegrationFailure):
+                await generate_claims(client, settings(), "Question")
+        release.set()
+        with pytest.raises(IntegrationFailure):
+            await first
+        assert len(calls) == 2
+        for circuit in _GENERATION_CIRCUITS.values():
+            circuit.until = time.monotonic() - 1
+        entered.clear()
+        release.clear()
+        probe = asyncio.create_task(generate_claims(client, settings(), "Question"))
+        await entered.wait()
+        with pytest.raises(IntegrationFailure):
+            await generate_claims(client, settings(), "Question")
+        release.set()
+        with pytest.raises(IntegrationFailure):
+            await probe
+        assert len(calls) == 4
+
+
+async def test_catalogue_outage_is_classified_and_cooled_down():
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    async def handler(request):
+        calls.append(request.method)
+        raise httpx.ReadTimeout("catalogue timeout")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(3):
+            with pytest.raises(IntegrationFailure) as error:
+                await generate_claims(client, settings(), "Question")
+            assert error.value.code == "provider_timeout"
+    assert calls == ["GET"]
+
+
+async def test_async_authorization_gate_does_not_allow_concurrent_model_storm():
+    import asyncio
+
+    from ps01_api.integrations import IntegrationFailure
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def recheck():
+        entered.set()
+        await release.wait()
+        return "current evidence"
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request.url.path)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        first = asyncio.create_task(
+            generate_claims(client, settings(), "Question", before_attempt=recheck)
+        )
+        await entered.wait()
+        with pytest.raises(IntegrationFailure):
+            await generate_claims(client, settings(), "Question")
+        release.set()
+        with pytest.raises(IntegrationFailure):
+            await first
+    assert len(calls) == 2

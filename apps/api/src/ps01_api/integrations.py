@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -155,16 +156,86 @@ async def retrieve_chunks(
 _MODEL_INVENTORY: dict[str, tuple[float, set[str]]] = {}
 
 
+@dataclass
+class _Circuit:
+    until: float = 0
+    failure: IntegrationFailure | None = None
+    in_flight: bool = False
+
+
+# Metadata only, credential/provider/model scoped, per API worker. One in-flight
+# call per model also prevents concurrent half-open probes from causing a storm.
+_GENERATION_CIRCUITS: dict[tuple[str, str], _Circuit] = {}
+
+
+def _circuit(settings, model):
+    fingerprint = hashlib.sha256(settings.gemini_api_key.get_secret_value().encode()).hexdigest()
+    key = (fingerprint, model)
+    if key not in _GENERATION_CIRCUITS and len(_GENERATION_CIRCUITS) >= 512:
+        expired = [
+            k
+            for k, v in _GENERATION_CIRCUITS.items()
+            if not v.in_flight and v.until <= time.monotonic()
+        ]
+        for old in expired:
+            del _GENERATION_CIRCUITS[old]
+    return _GENERATION_CIRCUITS.setdefault(key, _Circuit())
+
+
+def _blocked(circuit):
+    if not circuit.in_flight and circuit.until <= time.monotonic():
+        return None
+    previous = circuit.failure
+    failure = IntegrationFailure(
+        "Generation cooldown" if previous else "Generation already in flight",
+        code=previous.code if previous else "provider_unavailable",
+    )
+    if previous:
+        failure.provider_status = previous.provider_status
+        failure.retry_after = previous.retry_after
+    return failure
+
+
+def _cool_down(circuit, failure):
+    circuit.failure = failure
+    # A long upstream RetryInfo is diagnostic, never an hours-long local lockout.
+    # At most one bounded probe becomes eligible again in 30–120 seconds.
+    circuit.until = time.monotonic() + min(120, max(30, failure.retry_after or 30))
+
+
+def _transport_failure(exc):
+    return IntegrationFailure(
+        "Gemini transport failed",
+        code="provider_timeout"
+        if isinstance(exc, (httpx.TimeoutException, TimeoutError))
+        else "provider_unavailable",
+    )
+
+
 async def generation_models(client, settings):
     key = settings.gemini_api_key.get_secret_value()
     fingerprint = hashlib.sha256(key.encode()).hexdigest()
     cached = _MODEL_INVENTORY.get(fingerprint)
     if not cached or cached[0] < time.monotonic():
-        response = await client.get(
-            f"{GEMINI_API_ROOT}/models", headers={"x-goog-api-key": key}, timeout=5.0
-        )
+        circuit = _circuit(settings, "catalogue")
+        if failure := _blocked(circuit):
+            raise failure
+        circuit.in_flight = True
+        try:
+            response = await client.get(
+                f"{GEMINI_API_ROOT}/models", headers={"x-goog-api-key": key}, timeout=5.0
+            )
+        except (httpx.TransportError, TimeoutError) as exc:
+            failure = _transport_failure(exc)
+            _cool_down(circuit, failure)
+            raise failure from exc
+        finally:
+            circuit.in_flight = False
         if response.is_error:
-            raise provider_failure(response)
+            failure = provider_failure(response)
+            if response.status_code == 429 or response.status_code >= 500:
+                _cool_down(circuit, failure)
+            raise failure
         try:
             available = {
                 m["name"].removeprefix("models/")
@@ -176,6 +247,7 @@ async def generation_models(client, settings):
                 "Invalid model catalogue", code="provider_invalid_response"
             ) from exc
         _MODEL_INVENTORY[fingerprint] = (time.monotonic() + 300, available)
+        circuit.failure, circuit.until = None, 0
     else:
         available = cached[1]
     configured = list(
@@ -198,6 +270,7 @@ def provider_failure(response):
         403: "provider_authentication_failed",
         404: "provider_invalid_model",
         400: "provider_invalid_request",
+        408: "provider_timeout",
         504: "provider_timeout",
     }.get(response.status_code, "provider_unavailable")
     failure = IntegrationFailure(f"Gemini request failed (HTTP {response.status_code})", code=code)
@@ -249,6 +322,9 @@ async def generate_claims(client, settings, prompt, before_attempt=None):
 
 
 async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
+    shared = _circuit(settings, "shared-quota")
+    if failure := _blocked(shared):
+        raise failure
     models = await generation_models(client, settings)
     payload = {
         "systemInstruction": {"parts": [{"text": GENERATION_POLICY}]},
@@ -274,7 +350,21 @@ async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
             },
         },
     }
+    last_failure = None
     for index, model in enumerate(models):
+        circuit = _circuit(settings, model)
+        if failure := _blocked(circuit):
+            last_failure = failure
+            attempts.append(
+                {
+                    "model": model,
+                    "code": failure.code,
+                    "attempted": False,
+                    "cooldown": True,
+                    "provider_status": failure.provider_status,
+                }
+            )
+            continue
         # Gemini 3 Flash defaults to medium thinking. This bounded selector
         # resolves IDs rather than composing facts; low avoids spending the
         # request deadline/token budget on unnecessary reasoning. Other model
@@ -283,9 +373,16 @@ async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
             payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
         else:
             payload["generationConfig"].pop("thinkingConfig", None)
-        if before_attempt:
-            payload["contents"][0]["parts"][0]["text"] = await before_attempt()
-        attempt = {"model": model}
+        # Reserve before the asynchronous access check; otherwise concurrent
+        # requests can all pass the closed-circuit check while awaiting RLS.
+        circuit.in_flight = True
+        try:
+            if before_attempt:
+                payload["contents"][0]["parts"][0]["text"] = await before_attempt()
+        except BaseException:
+            circuit.in_flight = False
+            raise
+        attempt = {"model": model, "attempted": True}
         attempts.append(attempt)
         started = time.perf_counter()
         try:
@@ -295,32 +392,41 @@ async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
                 json=payload,
                 timeout=httpx.Timeout(20.0, connect=5.0),
             )
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            attempt["code"] = (
-                "provider_timeout"
-                if isinstance(exc, httpx.TimeoutException)
-                else "provider_unavailable"
-            )
+        except (httpx.TransportError, TimeoutError) as exc:
+            failure = _transport_failure(exc)
+            _cool_down(circuit, failure)
+            attempt["code"] = failure.code
+            last_failure = failure
             if index + 1 < len(models):
                 await asyncio.sleep(0.25)
                 continue
-            raise IntegrationFailure(
-                "Gemini transport failed",
-                code=(
-                    "provider_timeout"
-                    if isinstance(exc, httpx.TimeoutException)
-                    else "provider_unavailable"
-                ),
-            ) from exc
+            raise failure from exc
+        except asyncio.CancelledError:
+            failure = _transport_failure(TimeoutError())
+            _cool_down(circuit, failure)
+            attempt["code"] = failure.code
+            raise
         finally:
+            circuit.in_flight = False
             attempt["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
         attempt["provider_status"] = response.status_code
         if response.is_error:
             failure = provider_failure(response)
             attempt["code"] = failure.code
-            retryable = response.status_code in {404, 500, 502, 503, 504} or (
-                response.status_code == 429 and model_scoped_quota(response)
+            retryable = (
+                response.status_code == 408
+                or response.status_code >= 500
+                or (response.status_code == 429 and model_scoped_quota(response))
             )
+            if (
+                response.status_code == 429
+                or response.status_code >= 500
+                or response.status_code == 408
+            ):
+                _cool_down(circuit, failure)
+            if response.status_code == 429 and not model_scoped_quota(response):
+                _cool_down(shared, failure)
+            last_failure = failure
             if retryable and index + 1 < len(models):
                 # A different model is a different quota bucket; never retry this
                 # exhausted model before its RetryInfo interval has elapsed.
@@ -342,9 +448,10 @@ async def _generate_bounded(client, settings, prompt, before_attempt, attempts):
                 "Malformed structured output", code="provider_invalid_response"
             ) from exc
         attempt["code"] = "success"
+        circuit.failure, circuit.until = None, 0
         return output | {
             "_model": model,
             "_fallback_used": model != settings.gemini_chat_model,
             "_attempts": attempts,
         }
-    raise IntegrationFailure("No eligible model", code="provider_invalid_model")
+    raise last_failure or IntegrationFailure("No eligible model", code="provider_invalid_model")

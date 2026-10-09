@@ -205,10 +205,8 @@ def main() -> int:
             )
             if not synthetic_only:
                 blocked("Real Gemini answer/source inspection", "Synthetic corpus boundary failed.")
-                blocked("HR refusal", "Synthetic corpus boundary failed.")
             elif args.skip_generation:
                 blocked("Real Gemini answer/source inspection", "Explicitly skipped.")
-                blocked("HR refusal", "Explicitly skipped.")
             else:
                 query = "What amount is shown on Acme's scanned invoice?"
                 answer = client.post(
@@ -223,7 +221,6 @@ def main() -> int:
                         str(failure.get("code", "service_unavailable")),
                     )
                     checks[-1]["timing_ms"] = failure.get("timing_ms")
-                    blocked("HR refusal", "Provider unavailable; no further generation attempt.")
                 else:
                     answer.raise_for_status()
                     result = answer.json()
@@ -268,21 +265,25 @@ def main() -> int:
                             for s in inspected
                         ),
                     )
-                    denial = client.post(
-                        f"{api}/api/v1/chat/query",
-                        headers=headers("CEO", "HR Manager"),
-                        json={"query": query},
-                    )
-                    if denial.status_code == 503:
-                        blocked("HR refusal", str(denial.json().get("code", "service_unavailable")))
-                    else:
-                        denial.raise_for_status()
-                        record(
-                            "HR refusal",
-                            denial.json()["state"] == "INSUFFICIENT_EVIDENCE"
-                            and denial.json()["claims"] == [],
-                            "Unrelated authorized HR rows may reach generation; no false zero.",
-                        )
+            # This refusal has no relevant authorized evidence and must not
+            # depend on the unrelated finance provider request succeeding.
+            denial = client.post(
+                f"{api}/api/v1/chat/query",
+                headers=headers("CEO", "HR Manager"),
+                json={"query": "What amount is shown on Acme's scanned invoice?"},
+            )
+            if denial.status_code != 200:
+                blocked("HR refusal", str(denial.json().get("code", "service_unavailable")))
+            else:
+                body = denial.json()
+                record(
+                    "HR refusal without evidence supplied to generation",
+                    body["state"] == "INSUFFICIENT_EVIDENCE"
+                    and body["claims"] == []
+                    and body["trace"]["generation_model"] is None
+                    and body["trace"]["evidence_items_sent_to_model"] == 0,
+                )
+
     except (httpx.HTTPError, OSError, ValueError, RuntimeError, KeyError, StopIteration) as exc:
         blocked("Suite dependency or runtime", type(exc).__name__)
     failed = sum(c["status"] == "failed" for c in checks)

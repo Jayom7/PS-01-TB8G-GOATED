@@ -52,6 +52,13 @@ CASES = [
         "expected": set(),
         "forbidden": {"ACM-INV-2048-SCAN", "nova-finance-records"},
     },
+    {
+        "name": "cross-modal overdue status and contract terms",
+        "role": "Finance Manager",
+        "query": "Is Acme overdue and what payment terms does its contract specify?",
+        "expected": {"ACM-MSA-2026-07", "ACM-INV-2048-SCAN", "nova-finance-records"},
+        "require_all_expected": True,
+    },
 ]
 
 
@@ -131,7 +138,12 @@ async def run() -> dict[str, object]:
                     "name": case["name"],
                     "role": case["role"],
                     "top_k": TOP_K,
-                    "hit": bool(relevant_ranks) if expected else not forbidden_hits,
+                    "any_expected_source": bool(relevant_ranks),
+                    "hit": expected.issubset(set(found))
+                    if case.get("require_all_expected")
+                    else bool(relevant_ranks)
+                    if expected
+                    else not forbidden_hits,
                     "reciprocal_rank": 1 / relevant_ranks[0] if relevant_ranks else 0.0,
                     "authorized_rows": len(rows),
                     "source_types_found": sorted(
@@ -187,6 +199,7 @@ def summarize_results(results: list[dict], retrieved_rows: list[dict]) -> dict[s
     citation_checks = [bool(item.get("citation_id") and item.get("location")) for item in cited]
     invoice_modalities = set(results[0].get("source_types_found", []))
     structured_result = results[3]
+    cross_modal = results[5]
     latency_values = [
         float(row["latency_ms"])
         for row in results
@@ -195,12 +208,14 @@ def summarize_results(results: list[dict], retrieved_rows: list[dict]) -> dict[s
     return {
         "schema_version": 2,
         "scope": "local-synthetic-retrieval",
-        "dataset": "novacore-synthetic-v1",
+        "dataset": "novacore-synthetic-v2",
         "top_k": TOP_K,
         "query_count": len(CASES),
         "positive_query_count": len(positive),
         "retrieval_hit_rate_at_k": round(
-            sum(bool(row["hit"]) for row in positive) / len(positive), 3
+            sum(bool(row.get("any_expected_source", row["hit"])) for row in positive)
+            / len(positive),
+            3,
         ),
         "mean_reciprocal_rank": round(
             sum(float(row["reciprocal_rank"]) for row in positive) / len(positive), 3
@@ -214,7 +229,10 @@ def summarize_results(results: list[dict], retrieved_rows: list[dict]) -> dict[s
         "measured_checks": {
             "ocr_retrieval": "image_ocr" in invoice_modalities,
             "structured_record_retrieval": bool(structured_result["hit"]),
-            "cross_modal_retrieval": {"image_ocr", "structured"}.issubset(invoice_modalities),
+            "cross_modal_retrieval": bool(cross_modal["hit"])
+            and {"pdf", "image_ocr", "structured"}.issubset(
+                set(cross_modal.get("source_types_found", []))
+            ),
             "retrieved_citation_locations_present": sum(citation_checks),
             "retrieved_citation_locations_checked": len(citation_checks),
             "mean_latency_ms": round(sum(latency_values) / len(latency_values), 1)

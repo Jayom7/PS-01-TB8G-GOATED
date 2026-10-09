@@ -51,7 +51,9 @@ class TestApiSecurity:
         }
         captured: list[str] = []
 
-        async def generate(_client, _settings, prompt):
+        async def generate(_client, _settings, prompt, before_attempt=None):
+            if before_attempt:
+                prompt = await before_attempt()
             captured.append(prompt)
             return {
                 "claims": [
@@ -64,6 +66,7 @@ class TestApiSecurity:
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
             patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
+            patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate_mock,
@@ -100,6 +103,7 @@ class TestApiSecurity:
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
             patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
+            patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
@@ -139,6 +143,7 @@ class TestApiSecurity:
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
             patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
+            patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
@@ -180,6 +185,7 @@ class TestApiSecurity:
         with (
             patch("ps01_api.main.verify_supabase_session", new_callable=AsyncMock) as auth,
             patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
+            patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
             patch("ps01_api.main.retrieve_chunks", new_callable=AsyncMock) as retrieve,
             patch("ps01_api.main.generate_claims", new_callable=AsyncMock) as generate,
@@ -210,7 +216,7 @@ class TestApiSecurity:
                 json={"query": "Summarize the available evidence."},
             )
 
-        assert response.status_code == 503
+        assert response.status_code == 429
         assert response.json()["code"] == "provider_rate_limited"
         assert "rate-limited" in response.json()["detail"]
 
@@ -218,6 +224,7 @@ class TestApiSecurity:
         with (
             patch("ps01_api.main._identity", new_callable=AsyncMock) as identity,
             patch("ps01_api.main._local_demo_enabled", return_value=True),
+            patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
             patch("ps01_api.main.create_embedding", new_callable=AsyncMock) as embed,
         ):
             identity.return_value = {
@@ -280,18 +287,39 @@ async def test_ceo_context_uses_server_side_role_session_without_returning_it(tm
 
     credentials_path = tmp_path / "demo-credentials.json"
     credentials_path.write_text(
-        json.dumps({"Finance Manager": {"email": "finance@novacore.demo", "password": "demo"}})
+        json.dumps(
+            {
+                "Finance Manager": {"email": "finance@novacore.demo", "password": "demo"},
+                "CEO": {"email": "ceo@novacore.demo", "password": "demo"},
+            }
+        )
     )
     client = AsyncMock()
     client.post.return_value = SimpleNamespace(
         is_error=False,
         json=lambda: {"access_token": "server-only-role-token", "expires_in": 3600},
     )
-    identity = {"role": "CEO", "roles": ["CEO"]}
+    identity = {
+        "role": "CEO",
+        "roles": ["CEO"],
+        "user_id": "ceo",
+        "organization_id": "org",
+        "email": "ceo@novacore.demo",
+    }
 
     with (
         patch("ps01_api.main._local_demo_enabled", return_value=True),
         patch("ps01_api.main.DEMO_CREDENTIALS", credentials_path),
+        patch(
+            "ps01_api.main._identity",
+            AsyncMock(
+                return_value={
+                    "organization_id": "org",
+                    "role": "Finance Manager",
+                    "email": "finance@novacore.demo",
+                }
+            ),
+        ),
     ):
         token, role = await _context_token(
             client, get_settings(), "original-ceo-session", identity, "Finance Manager"

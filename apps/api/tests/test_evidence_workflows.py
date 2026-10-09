@@ -30,6 +30,7 @@ def test_stream_stage_order_and_only_validated_final_text():
     }
     with (
         patch("ps01_api.main._identity", AsyncMock(return_value=IDENTITY)),
+        patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
         patch("ps01_api.main.create_embedding", AsyncMock(return_value=[0] * 1536)),
         patch("ps01_api.main.retrieve_chunks", AsyncMock(return_value=[row])),
         patch(
@@ -57,6 +58,7 @@ def test_stream_forged_role_denied_before_embedding():
             "ps01_api.main._identity",
             AsyncMock(return_value={**IDENTITY, "role": "HR Manager", "roles": ["HR Manager"]}),
         ),
+        patch("ps01_api.main.revalidate_evidence", AsyncMock(side_effect=lambda c, s, t, e: e)),
         patch("ps01_api.main.create_embedding", AsyncMock()) as embedding,
     ):
         response = TestClient(app).post(

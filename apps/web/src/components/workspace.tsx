@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Drawer } from "@/components/drawer";
 import { Icon, type IconName } from "@/components/icons";
 import { createClient } from "@/lib/supabase/client";
+import { sessionToken } from "@/lib/session";
 
 export type View = "Dashboard" | "Ask" | "Sources" | "Ingest" | "Security" | "Evaluation";
 type Citation = {
@@ -18,7 +19,8 @@ type Claim = { text: string; citations: Citation[] };
 type QueryResult = {
   request_id: string;
   conversation_id?: string;
-  state: "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "INSUFFICIENT_EVIDENCE";
+  message?: string;
+  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "INSUFFICIENT_EVIDENCE";
   claims: Claim[];
   trace: {
     session_verified: boolean;
@@ -76,6 +78,7 @@ type WorkspaceData = {
   structured_record_count: number;
   documents: Source[];
   recent_queries: { query: string; state: string; created_at: string }[];
+  security_activity: { kind: string; outcome: string; created_at: string }[];
   authorization: string;
   api: string;
   supabase: string;
@@ -173,9 +176,22 @@ function networkMessage(cause: unknown, fallback: string) {
   return cause instanceof Error ? cause.message : fallback;
 }
 
+function sessionExpired() {
+  window.dispatchEvent(new Event("clearframe-session-expired"));
+}
 async function currentToken() {
-  const { data } = await createClient().auth.getSession();
-  return data.session?.access_token ?? null;
+  return sessionToken(createClient().auth, sessionExpired);
+}
+async function authorizedFetch(input: string, init: RequestInit = {}) {
+  let response = await fetch(input, init);
+  if (response.status === 401) {
+    const token = await sessionToken(createClient().auth, sessionExpired, true);
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    response = await fetch(input, { ...init, headers });
+    if (response.status === 401) sessionExpired();
+  }
+  return response;
 }
 
 async function apiGet<T>(path: string, demoRole?: string) {
@@ -183,7 +199,7 @@ async function apiGet<T>(path: string, demoRole?: string) {
   if (!token) throw new Error("Your session expired. Sign in again to continue.");
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (demoRole) headers["X-Demo-Role"] = demoRole;
-  return readResponse<T>(await fetch(`${API_BASE}${path}`, {
+  return readResponse<T>(await authorizedFetch(`${API_BASE}${path}`, {
     headers,
     cache: "no-store",
     signal: AbortSignal.timeout(20_000),
@@ -193,6 +209,15 @@ async function apiGet<T>(path: string, demoRole?: string) {
 export default function Workspace({ identity, view }: { identity: string; view: View }) {
   const router = useRouter();
   const pathname = usePathname();
+  const [signedOut, setSignedOut] = useState(false);
+  useEffect(() => {
+    const expire = () => { setSignedOut(true); router.replace("/login?reason=session-expired"); router.refresh(); };
+    window.addEventListener("clearframe-session-expired", expire);
+    const { data: { subscription } } = createClient().auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT") expire();
+    });
+    return () => { window.removeEventListener("clearframe-session-expired", expire); subscription.unsubscribe(); };
+  }, [router]);
   const [query, setQuery] = useState("");
   const [askedQuery, setAskedQuery] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
@@ -206,6 +231,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [turns, setTurns] = useState<{ query: string; response: QueryResult }[]>([]);
   const [conversations, setConversations] = useState<{ id: string; title: string; updated_at: string }[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [retryEvidence, setRetryEvidence] = useState<Citation[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [activeRole, setActiveRole] = useState("");
@@ -217,6 +244,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const theme = useSyncExternalStore(subscribeTheme, readTheme, () => "light");
+  const [deleteTarget, setDeleteTarget] = useState<Source | null>(null);
+  const [sourceNotice, setSourceNotice] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("");
   const [sourceTypeFilter, setSourceTypeFilter] = useState("all");
   const [structuredJson, setStructuredJson] = useState(JSON.stringify({ invoice_id: "INV-2049", customer_id: "CUST-ACM-1001", customer: "Acme Manufacturing", currency: "USD", total_minor_units: 120000, invoice_date: "2026-10-01", due_date: "2026-10-31", payment_status: "unpaid", status_as_of: "2026-10-09" }, null, 2));
@@ -224,6 +253,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const [ingestFile, setIngestFile] = useState<File | null>(null);
   const [ingestResult, setIngestResult] = useState<string | null>(null);
   const sourceRequest = useRef(0);
+  const askInFlight = useRef(false);
   const navigationRef = useRef<HTMLElement>(null);
   const roleRestoreStarted = useRef(false);
   const activeRoleRef = useRef("");
@@ -258,20 +288,23 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   async function ask(event?: FormEvent<HTMLFormElement>, retryQuestion?: string) {
     event?.preventDefault();
     const question = (retryQuestion ?? query).trim();
-    if (!question || pending) return;
+    if (!question || askInFlight.current) return;
+    askInFlight.current = true;
+    setQuery("");
     setPending(true);
     setError(null);
     setResult(null);
     setActiveSource(null);
     setAskedQuery(question);
     setStage("connecting");
+    setRetryEvidence([]);
     try {
       const token = await currentToken();
       if (!token) {
         router.replace("/login");
         return;
       }
-      const response = await fetch(`${API_BASE}/api/v1/chat/stream`, {
+      const response = await authorizedFetch(`${API_BASE}/api/v1/chat/stream`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         body: JSON.stringify({ query: question, ...(conversationId ? { conversation_id: conversationId } : {}) }),
@@ -294,9 +327,12 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           if (!data) continue;
           const payload = JSON.parse(data);
           if (kind === "progress") setStage(payload.stage);
-          if (kind === "error") throw new Error(payload.code === "provider_rate_limited"
-            ? "Answer generation is rate-limited. Retry later."
-            : "The answer service is unavailable. No unvalidated answer was released.");
+          if (kind === "error") {
+            if (payload.code === "session_expired") sessionExpired();
+            setRetryEvidence(payload.evidence ?? []);
+            const retry = payload.retry_after_seconds ? ` Retry after ${Math.ceil(payload.retry_after_seconds / 60)} minutes.` : "";
+            throw new Error((payload.detail ?? "The answer service is unavailable.") + retry);
+          }
           if (kind === "result") {
             setResult(payload);
             setConversationId(payload.conversation_id ?? null);
@@ -312,6 +348,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     } catch (cause) {
       setError(networkMessage(cause, "The answer could not be generated."));
     } finally {
+      askInFlight.current = false;
       setPending(false);
     }
   }
@@ -365,7 +402,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     try {
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
-      const switched = await readResponse<{ active_role: string }>(await fetch(`${API_BASE}/api/v1/demo/switch`, {
+      const switched = await readResponse<{ active_role: string }>(await authorizedFetch(`${API_BASE}/api/v1/demo/switch`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         body: JSON.stringify({ role }),
@@ -411,11 +448,13 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   }, [activeRole, switchDemoUser, workspace]);
 
   async function loadHistory() {
+    setHistoryLoading(true);
     try {
       const data = await apiGet<{ conversations: typeof conversations }>("/api/v1/conversations", activeRole || undefined);
       if (activeRoleRef.current === activeRole) setConversations(data.conversations);
       setHistoryError(null);
-    } catch { setHistoryError("Conversation history is unavailable. This requires the current database migration."); }
+    } catch (cause) { setHistoryError(networkMessage(cause, "Conversation history is unavailable. Please retry.")); }
+    finally { setHistoryLoading(false); }
   }
 
   async function reopenConversation(id: string) {
@@ -436,7 +475,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   async function removeConversation(id: string) {
     try {
       const token = await currentToken();
-      await readResponse(await fetch(`${API_BASE}/api/v1/conversations/${id}`, {
+      await readResponse(await authorizedFetch(`${API_BASE}/api/v1/conversations/${id}`, {
         method: "DELETE", headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
       }));
       setConversations((previous) => previous.filter((entry) => entry.id !== id));
@@ -455,7 +494,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     let objectUrl: string | null = null;
     void currentToken().then(async (token) => {
       const page = activeSource.source_type === "pdf" ? `?page=${activeSource.location.page ?? 1}` : "";
-      const response = await fetch(`${API_BASE}${activeSource.preview_path}${page}`, {
+      const response = await authorizedFetch(`${API_BASE}${activeSource.preview_path}${page}`, {
         headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         signal: controller.signal, cache: "no-store",
       });
@@ -559,6 +598,22 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     if (pathname !== viewRoutes[nextView]) router.push(viewRoutes[nextView]);
   }
 
+  async function confirmDeleteSource() {
+    if (!deleteTarget || pending) return;
+    setPending(true); setError(null);
+    try {
+      const token = await currentToken();
+      const deleted = await readResponse<{ original_cleanup: string }>(await authorizedFetch(`${API_BASE}/api/v1/sources/${deleteTarget.id}`, {
+        method: "DELETE", headers: { Authorization: `Bearer ${token}`, "X-Demo-Role": activeRole },
+      }));
+      setSources((previous) => previous?.filter((source) => source.id !== deleteTarget.id) ?? null);
+      setSourceNotice(`${deleteTarget.source_name} deleted. ${deleted.original_cleanup === "pending" ? "Private-file cleanup is pending; retrieval access has been removed." : "Its index, grants and uploaded original were removed."}`);
+      setDeleteTarget(null); setActiveSource(null);
+      void refreshWorkspace();
+    } catch (cause) { setError(networkMessage(cause, "Source could not be deleted.")); }
+    finally { setPending(false); }
+  }
+
   async function uploadFile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!ingestFile) return;
@@ -569,7 +624,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     try {
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
-      const response = await fetch(`${API_BASE}/api/v1/ingest/file`, {
+      const response = await authorizedFetch(`${API_BASE}/api/v1/ingest/file`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -601,7 +656,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       if (!fields || typeof fields !== "object" || Array.isArray(fields)) throw new Error("Fields must be a JSON object.");
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
-      const response = await fetch(`${API_BASE}/api/v1/ingest/structured`, {
+      const response = await authorizedFetch(`${API_BASE}/api/v1/ingest/structured`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         body: JSON.stringify({ table: structuredMeta.table, row_id: structuredMeta.rowId, source_name: structuredMeta.sourceName, fields, access_role: structuredMeta.accessRole }),
@@ -624,7 +679,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     try {
       const token = await currentToken();
       if (!token) throw new Error("Your session expired. Sign in again to continue.");
-      const payload = await readResponse<{ result: EvaluationData }>(await fetch(`${API_BASE}/api/v1/evaluation/run`, {
+      const payload = await readResponse<{ result: EvaluationData }>(await authorizedFetch(`${API_BASE}/api/v1/evaluation/run`, {
         method: "POST", headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
       }));
       setEvaluation(payload.result);
@@ -632,7 +687,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     finally { setPending(false); }
   }
 
-  const role = activeRole || workspace?.active_role || workspace?.identity.role || "Loading";
+  const role = activeRole || workspace?.active_role || workspace?.identity.role || (error ? "Unavailable" : "Loading");
   const userName = workspace?.identity.display_name ?? identity;
   const filteredSources = (sources ?? []).filter((source) =>
     (sourceTypeFilter === "all" || source.source_type === sourceTypeFilter)
@@ -668,6 +723,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     window.dispatchEvent(new Event("clearframe-theme-change"));
   }
 
+  if (signedOut) return <main className="auth-loading"><p>Your session ended.</p><Link href="/login">Sign in again</Link></main>;
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -678,7 +734,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           <span className="brand-mark" aria-hidden="true"><Icon name="lock" size={17} /></span><span className="brand-name">Clearframe</span>
         </div>
         <div className="topbar-context"><span>Workspace</span><span className="context-separator" aria-hidden="true">/</span><strong>{view === "Dashboard" ? "Overview" : view}</strong></div>
-        <div className="topbar-state"><span className="workspace-indicator"><Icon name="lock" size={14} />Protected knowledge</span></div>
+        <div className="topbar-state" />
       </header>
 
       <div className="workspace-grid">
@@ -702,6 +758,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
                 <Icon name="chevron" size={16} />
               </summary>
               <div className="account-popover">
+                {!workspace && error && <button type="button" className="text-button" onClick={() => void refreshWorkspace()}>Retry account access</button>}
                 <p className="account-current"><strong>Authenticated identity · {userName}</strong><span>{workspace?.identity.email ?? identity}</span><small>Active demo context · {role}</small></p>
                 {workspace?.demo_switch_available && <label className="field-label account-role-field">Switch demo role<select aria-label="Switch demo role" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending} onChange={(event) => void switchDemoUser(event.target.value)}>{DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}</select></label>}
                 <button className="account-action" type="button" onClick={() => setSelectedTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "Use dark theme" : "Use light theme"}</button>
@@ -732,6 +789,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
               historyOpen={historyOpen}
               conversations={conversations}
               historyError={historyError}
+              historyLoading={historyLoading}
+              retryEvidence={retryEvidence}
               onReopen={reopenConversation}
               onRemove={removeConversation}
               onSource={openSource}
@@ -739,7 +798,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           ) : view === "Dashboard" ? (
             <DashboardView data={workspace} error={error} onRefresh={() => void refreshWorkspace()} onNavigate={selectView} />
           ) : view === "Sources" ? (
-            <SourcesView sources={sources === null ? null : filteredSources} filter={sourceFilter} onFilter={setSourceFilter} typeFilter={sourceTypeFilter} onTypeFilter={setSourceTypeFilter} pending={pending} error={error} onOpen={(source, trigger) => { void openDocument(source, trigger); }} onRefresh={() => { setSources(null); void loadSources(); }} />
+            <SourcesView sources={sources === null ? null : filteredSources} canDelete={role === "CEO" && !!workspace?.demo_switch_available} onDelete={setDeleteTarget} notice={sourceNotice} filter={sourceFilter} onFilter={setSourceFilter} typeFilter={sourceTypeFilter} onTypeFilter={setSourceTypeFilter} pending={pending} error={error} onOpen={(source, trigger) => { void openDocument(source, trigger); }} onRefresh={() => { setSources(null); void loadSources(); }} />
           ) : view === "Ingest" ? (
             <IngestView
               role={role}
@@ -767,6 +826,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       </div>
 
       {navigationOpen && <button type="button" className="mobile-scrim nav-scrim" aria-label="Close navigation" onClick={() => setNavigationOpen(false)} />}
+      {deleteTarget && <Drawer title="Delete source" description="Remove this source from the workspace" onClose={() => { if (!pending) setDeleteTarget(null); }}><div className="delete-confirm"><p>Delete <strong>{deleteTarget.source_name}</strong>?</p><p>This removes its searchable chunks, access grants and uploaded original. Saved conversations will no longer reveal its evidence. This cannot be undone.</p>{error && <p className="request-error" role="alert">{error}</p>}<div className="confirmation-actions"><button type="button" className="quiet-button" disabled={pending} onClick={() => { setDeleteTarget(null); setError(null); }}>Cancel</button><button type="button" className="primary-action" disabled={pending} onClick={() => void confirmDeleteSource()}>{pending ? "Deleting…" : "Delete source"}</button></div></div></Drawer>}
       {sourceOpen && activeSource && <Drawer title="Source evidence" description="Authorized source inspection" onClose={closeSource}>
         {sourceError ? <p className="request-error" role="alert">This source is outside your current access scope or unavailable.</p> : <article className="drawer-source">
           <div className="drawer-source-title"><Icon name={activeSource.source_type === "structured" ? "table" : "files"} size={18} /><div><strong>{activeSource.source_type === "structured" ? "Structured record" : activeSource.title ?? "Source"}</strong><span>{formatLocation(activeSource.location)}</span></div></div>
@@ -795,39 +855,44 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   );
 }
 
-function AskView({ identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource, turns, stage, onTrace, onNew, onHistory, historyOpen, conversations, historyError, onReopen, onRemove }: {
+function AskView({ identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource, turns, stage, onTrace, onNew, onHistory, historyOpen, conversations, historyError, historyLoading, retryEvidence, onReopen, onRemove }: {
   identity: string; role: string; query: string; setQuery: (value: string) => void; askedQuery: string;
   result: QueryResult | null; pending: boolean; error: string | null;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRetry: () => void;
   onSource: (citation: Citation, trigger: HTMLElement) => void;
   turns: { query: string; response: QueryResult }[]; stage: string; onTrace: () => void; onNew: () => void;
   onHistory: () => void; historyOpen: boolean; conversations: { id: string; title: string; updated_at: string }[];
+  historyLoading: boolean; retryEvidence: Citation[];
   historyError: string | null; onReopen: (id: string) => void; onRemove: (id: string) => void;
 }) {
-  const steps = ["checking_access", "searching_knowledge", "evidence_selected", "generating_response", "validating_citations", "validation_complete"];
-  const stageIndex = stage === "access_checked" ? 1 : stage === "retrieval_complete" ? 2 : steps.indexOf(stage);
+  const progressLabel: Record<string, string> = {connecting: "Preparing the question", checking_access: "Preparing the question", access_checked: "Preparing the question", searching_knowledge: "Searching authorized sources", retrieval_complete: "Checking source references", checking_references: "Checking source references", evidence_selected: "Checking source references", generating_response: "Writing the grounded answer", validating_citations: "Checking source references", validation_complete: "Finishing the conversation"};
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [turns.length, pending, error]);
   const messages = turns.length ? turns : result ? [{ query: askedQuery, response: result }] : [];
   return <>
     <div className="conversation-header"><div><h1>Ask</h1><p>Ask about protected company knowledge.</p></div><div className="conversation-controls"><button className="quiet-button" type="button" disabled={pending} aria-expanded={historyOpen} onClick={onHistory}><Icon name="files" size={15} />History</button><button className="quiet-button" type="button" disabled={pending} onClick={onNew}>New conversation</button></div></div>
     <div className="ask-context"><Icon name="lock" size={14} /><span>{role}</span><span>Access checked before search</span></div>
     <div className={`ask-layout ${historyOpen ? "with-history" : ""}`}>
-      {historyOpen && <aside className="conversation-history" aria-label="Conversation history"><h2>Recent conversations</h2><p>In your current access context</p>{historyError ? <p role="status">{historyError}</p> : conversations.length ? <ol>{conversations.map((entry) => <li key={entry.id}><button type="button" disabled={pending} onClick={() => onReopen(entry.id)}><strong>{entry.title}</strong><small>{formatTime(entry.updated_at)}</small></button><button className="history-remove" type="button" disabled={pending} aria-label={`Remove conversation ${entry.title}`} onClick={() => onRemove(entry.id)}><Icon name="close" size={14} /></button></li>)}</ol> : <p>No conversations saved yet.</p>}</aside>}
-      <div className="ask-main"><div className="conversation-scroll">
+      {historyOpen && <aside className="conversation-history" aria-label="Conversation history"><h2>Recent conversations</h2><p>In your current access context</p>{historyLoading ? <p role="status">Loading conversations…</p> : historyError ? <p role="status">{historyError}</p> : conversations.length ? <ol>{conversations.map((entry) => <li key={entry.id}><button type="button" disabled={pending} onClick={() => onReopen(entry.id)}><strong>{entry.title}</strong><small>{formatTime(entry.updated_at)}</small></button><button className="history-remove" type="button" disabled={pending} aria-label={`Remove conversation ${entry.title}`} onClick={() => onRemove(entry.id)}><Icon name="close" size={14} /></button></li>)}</ol> : <p>No conversations saved yet.</p>}</aside>}
+      <div className="ask-main"><div className="conversation-scroll" ref={scrollRef}>
       {messages.length ? <div className="message-thread" aria-live="polite">{messages.map((turn) => <div className="conversation-turn" key={turn.response.request_id}>
         <div className="question-bubble"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{turn.query}</p></div>
-        {turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className="answer-label">From your authorized sources</h2>
+        {turn.response.state === "SMALL_TALK" ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>Conversation helper · no company-data lookup</small></div></div> : turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className="answer-label">From your authorized sources</h2>
         {turn.response.claims.map((claim, index) => <p key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citation.citation_id}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citation.citation_id)}: ${citation.title ?? "Source"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citation.citation_id)}]</button>)}</p>)}
-        <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Canonical excerpts · source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
+        <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
         {turn.response.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Some selected evidence could not be validated. Only accepted excerpts are shown.</p>}
         {turn.response.trace.history_saved === false && <p className="response-secondary">This answer could not be saved to history.</p>}
         </div></div>}
       </div>)}</div> : !pending && !error && <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="files" size={24} /></div><h2>What would you like to know?</h2><p>Find answers in contracts, scanned documents, and business records.</p><div className="question-examples" aria-label="Example questions">{exampleQuestions.map((example) => <button className="sample-question" type="button" key={example} onClick={() => setQuery(example)}><span>{example}</span><Icon name="arrow" size={17} /></button>)}</div></div>}
       {(pending || error) && askedQuery && <div className="question-bubble pending-question"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{askedQuery}</p></div>}
-      {pending && <ol className="query-progress" aria-label="Request progress" aria-live="polite">{["Checking access", "Searching protected knowledge", "Selecting evidence", "Generating response", "Validating citations"].map((label, index) => <li key={label} data-state={index < stageIndex ? "done" : index === stageIndex ? "active" : "waiting"}><span>{index < stageIndex ? "✓" : "○"}</span>{label}</li>)}</ol>}
+      {pending && <div className="query-progress current-progress" role="status" aria-live="polite"><span className="progress-dot" aria-hidden="true" />{progressLabel[stage] ?? "Preparing the question"}</div>}
       {error && <div className="request-error" role="alert"><p>{error}</p><button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button></div>}
+      {error && retryEvidence.length > 0 && <details className="retry-evidence"><summary>Sources found before generation stopped</summary><p>Open a source to recheck your current access.</p>{retryEvidence.slice(0, 8).map((citation) => <button className="text-button" key={`${citation.citation_id}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{citation.title ?? "Authorized source"} · {formatLocation(citation.location)}</button>)}</details>}
       {result && !pending && <button className="trace-control text-button" type="button" onClick={onTrace}>View retrieval trace <Icon name="arrow" size={14} /></button>}
       </div>
-      <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Waiting for a verified response" : "Enter to ask · Shift + Enter for a new line"}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Processing" : "Ask"}</span></button></div></form><p className="composer-policy">Answers show canonical source excerpts. Open evidence to inspect the original.</p></div>
+      <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Waiting for a verified response" : ""}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Processing" : "Ask"}</span></button></div></form><p className="composer-policy">Answers use authorized source text and bounded business summaries. Open evidence to inspect the original; general semantic entailment is not verified.</p></div>
       </div>
     </div>
   </>;
@@ -840,22 +905,26 @@ function DashboardView({ data, error, onRefresh, onNavigate }: { data: Workspace
     <div className="dashboard-identity"><span className="user-indicator">{data.identity.display_name.slice(0, 1).toUpperCase()}</span><div><strong>Authenticated · {data.identity.display_name}</strong><span>{data.identity.email} · Active context: {data.active_role}</span></div><span className="status-pill status-good">Authorization {data.authorization}</span></div>
     <dl className="metric-strip"><Metric label="Authorized sources" value={data.document_count} /><Metric label="Searchable chunks" value={data.chunk_count} /><Metric label="Structured records" value={data.structured_record_count} /></dl>
     <div className="dashboard-shortcuts" aria-label="Workspace shortcuts">{(["Ask", "Sources", "Ingest", "Security", "Evaluation"] as const).map((item) => <button className="quiet-button" key={item} type="button" onClick={() => onNavigate(item)}>{item}</button>)}</div>
+    <section className="data-section"><SectionTitle title="Recent indexed sources" action={<button className="text-button" type="button" onClick={() => onNavigate("Ingest")}>Add a source</button>} /><ol className="recent-query-list">{data.documents.slice(0, 5).map((source) => <li key={source.id}><span>{source.source_name}</span><small>{sourceTypeLabel(source.source_type)} · {source.metadata.chunk_count === undefined ? "Stored source" : `${source.metadata.chunk_count} indexed chunks`} · {formatTime(source.created_at)}</small></li>)}</ol><p className="trace-disclaimer">Local synthetic workspace. Counts reflect your current access; provider availability is checked only when requested.</p></section>
+    <section className="data-section"><SectionTitle title="Recent access activity" action={<button className="text-button" type="button" onClick={() => onNavigate("Security")}>Inspect security</button>} />{data.security_activity?.length ? <ol className="recent-query-list">{data.security_activity.map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.kind.replaceAll("_", " ")} · {item.outcome.replaceAll("_", " ")}</span><small>{formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No recorded access events in this context.</p>}</section>
     <div className="dashboard-columns"><section className="data-section"><SectionTitle title="System connections" /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Latest evaluation" value={data.latest_evaluation_status} /></div></section>
-      <section className="data-section"><SectionTitle title="Recent queries" action={<button className="text-button" type="button" onClick={() => onNavigate("Ask")}>Ask a question</button>} />{data.recent_queries.length ? <ol className="recent-query-list">{data.recent_queries.slice(0, 6).map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.query}</span><small>{item.state.replaceAll("_", " ")} · {formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No queries in this API session yet.</p>}</section></div>
+      <section className="data-section"><SectionTitle title="Recent queries" action={<button className="text-button" type="button" onClick={() => onNavigate("Ask")}>Ask a question</button>} />{data.recent_queries.length ? <ol className="recent-query-list">{data.recent_queries.slice(0, 6).map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.query}</span><small>{item.state.replaceAll("_", " ")} · {formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No saved queries in this context yet.</p>}</section></div>
   </div>;
 }
 
-function SourcesView({ sources, filter, onFilter, typeFilter, onTypeFilter, pending, error, onOpen, onRefresh }: {
+function SourcesView({ sources, canDelete, onDelete, notice, filter, onFilter, typeFilter, onTypeFilter, pending, error, onOpen, onRefresh }: {
+  canDelete: boolean; onDelete: (source: Source) => void; notice: string | null;
   sources: Source[] | null; filter: string; onFilter: (value: string) => void; typeFilter: string; onTypeFilter: (value: string) => void; pending: boolean; error: string | null;
   onOpen: (source: Source, trigger: HTMLElement) => void; onRefresh: () => void;
 }) {
   const [sort, setSort] = useState("recent");
   const orderedSources = sources ? [...sources].sort((a, b) => sort === "name" ? a.source_name.localeCompare(b.source_name) : b.created_at.localeCompare(a.created_at)) : [];
-  if (!sources) return <PageState title="Sources" pending={pending} error={error} onRefresh={onRefresh} />;
+  if (!sources) return <PageState title="Sources" pending={pending || !error} error={error} onRefresh={onRefresh} />;
   return <div className="data-page"><PageHeading title="Sources" description="Documents and business records within your current access." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
     {error && <p className="request-error" role="alert">{error}</p>}
+    {notice && <p role="status" className="source-notice">{notice}</p>}
     <div className="sources-toolbar"><div className="sources-filters"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Search authorized names or IDs" /></label><label className="source-type-filter"><span className="sr-only">Filter by source type</span><select value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}><option value="all">All types</option><option value="pdf">PDF</option><option value="image_ocr">Image / OCR</option><option value="structured">Structured record</option></select></label><label className="source-type-filter"><span className="sr-only">Sort sources</span><select aria-label="Sort sources" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">Newest first</option><option value="name">Source name</option></select></label></div><p className="list-count">{sources.length} authorized {sources.length === 1 ? "source" : "sources"}</p></div>
-    {sources.length ? <div className="source-table-wrap"><table className="source-table knowledge-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th><th><span className="sr-only">Open source</span></th></tr></thead><tbody>{orderedSources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{typeof source.metadata.table === "string" ? source.metadata.table : "Protected source"}</small><button className="text-button mobile-source-open" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open source</button></td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><button className="text-button" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open</button></td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter || typeFilter !== "all" ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter || typeFilter !== "all" ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
+    {sources.length ? <div className="source-table-wrap"><table className="source-table knowledge-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Ingested chunks</th><th><span className="sr-only">Open source</span></th></tr></thead><tbody>{orderedSources.map((source) => <tr key={source.id}><td><strong>{source.source_name}</strong><small>{typeof source.metadata.table === "string" ? source.metadata.table : "Protected source"}</small><button className="text-button mobile-source-open" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open source</button>{canDelete && <button className="text-button mobile-source-open danger-text" type="button" disabled={pending} onClick={() => onDelete(source)}>Delete source</button>}</td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><button className="text-button" type="button" onClick={(event) => onOpen(source, event.currentTarget)}>Open</button>{canDelete && <button className="text-button danger-text" type="button" disabled={pending} onClick={() => onDelete(source)}>Delete</button>}</td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter || typeFilter !== "all" ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter || typeFilter !== "all" ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
   </div>;
 }
 
@@ -903,7 +972,7 @@ function SecurityView({ data, pending, error, onRefresh }: { data: SecurityData 
     <ContextBand identity={data.identity.display_name} email={data.identity.email} role={data.active_role} verified />
     <section className="data-section"><SectionTitle title="Retrieval authorization boundary" /><div className="security-flow">{([{ label: "Identity", icon: "user", note: "Validated session" }, { label: "Authorization", icon: "lock", note: "Database policies" }, { label: "Secure retrieval", icon: "search", note: "Role-scoped matches" }, { label: "Authorized evidence", icon: "files", note: "Retrieved source rows" }, { label: "Generation", icon: "chat", note: "Answer generation" }] as const).map((step, index) => <div className={`security-step ${index === 1 ? "security-boundary" : ""}`} key={step.label}><Icon name={step.icon} size={19} /><strong>{step.label}</strong><span>{step.note}</span>{index < 4 && <Icon name="arrow" size={15} className="flow-arrow" />}</div>)}</div><p className="trace-disclaimer">Architectural design: retrieval uses the validated user or server-brokered demo-role session. Unauthorized evidence supplied to the model: not independently measured in this trace. The endpoint does not probe hosted RLS status.</p></section>
     <section className="data-section"><SectionTitle title="Effective access scope" /><p className="scope-copy"><Icon name="lock" size={15} />{data.effective_scope}</p><div className="security-checks">{Object.entries(data.security_tests).map(([label, value]) => <div key={label} className={label === "basis" ? "security-check-basis" : undefined} data-unverified={/not checked|not independently measured|not verified/.test(String(value)) || undefined}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></div>)}</div></section>
-    <section className="data-section"><SectionTitle title="Recent retrieval decisions" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count} authorized evidence items · unauthorized evidence supplied to the model: not independently measured</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question to see a real retrieval trace for this session.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Recent events are held in this API process and clear when it restarts.</p></section>
+    <section className="data-section"><SectionTitle title="Recent security activity" /><ol className="trace-list">{data.trace.length ? data.trace.map((entry) => <li key={entry.query_id}><span className="trace-dot" /><div><strong>{entry.decision} · {entry.active_role}</strong><span>{entry.authorized_evidence_count == null ? "Evidence count unmeasured for this action" : `${entry.authorized_evidence_count} authorized evidence items`} · unauthorized evidence supplied to the model: not independently measured</span></div><time>{formatTime(entry.created_at)}</time></li>) : <li className="empty-note">Ask a question or inspect a source to record activity in this context.</li>}</ol><p className="trace-disclaimer">The trace omits source names and contents. Events persist in PostgreSQL and are visible only to the signed-in actor and current context. Unverified identities are not attributed to events.</p></section>
   </div>;
 }
 
@@ -912,6 +981,7 @@ function EvaluationView({ data, pending, error, role, onRefresh, onRun }: { data
     {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : pending ? <p role="status">Loading evaluation state…</p> : <><h2>No evaluation run recorded</h2><p>Run the real retrieval suite to measure hit rate, ranking, modality coverage, and authorization boundaries.</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Checking evaluation…" : "Run evaluation"}</button>{role !== "CEO" && <small>Switch to the CEO access context to inspect or run the local test suite.</small>}</div> : <>
       <div className="evaluation-scope"><p className="evaluation-run-label"><Icon name="chart" size={15} />{data.run_kind === "historical_legacy" ? "Historical saved run · legacy labels corrected; not rerun" : data.run_kind === "fresh_local" ? "Fresh local synthetic run" : "Recorded local synthetic run; not rerun on refresh"}</p><div className="evaluation-observations"><span>Checked authorization cases · {data.authorization_violations} forbidden hits</span><span>Retrieved citation locations · {String(data.measured_checks?.retrieved_citation_locations_present ?? "not measured")} / {String(data.measured_checks?.retrieved_citation_locations_checked ?? "not measured")} present</span><span>Mean latency · {formatLatency(data.measured_checks?.mean_latency_ms)}</span></div></div>
       <div className="evaluation-summary"><div><span>Dataset</span><strong>{data.dataset}</strong></div><div><span>Queries</span><strong>{data.query_count}</strong></div><div><span>Hit rate@{data.top_k}</span><strong>{formatMetric(data.retrieval_hit_rate_at_k)}</strong></div><div><span>Mean reciprocal rank</span><strong>{formatMetric(data.mean_reciprocal_rank)}</strong></div><div><span>Checked forbidden hits</span><strong className={data.authorization_violations ? "metric-bad" : "metric-good"}>{data.authorization_violations}</strong></div></div>
+      <p className="empty-note">Generation-dependent checks are not run by this retrieval suite. A real Ask answer, its citations and live injection resistance require separate verification; provider outages can block those checks.</p>
       <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong></td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
       <p className="trace-disclaimer">Retrieved with authenticated demo users against the local database. This small synthetic run measures retrieval and row-level authorization; hit rate means any expected source was found, not recall over all relevant sources. Citation-location presence does not verify answer provenance or entailment. It does not establish representative-scale quality or semantic answer quality.{data.completed_at ? ` Completed ${formatTime(data.completed_at)}.` : ""}</p>
       {error && <p className="request-error" role="alert">{error}</p>}

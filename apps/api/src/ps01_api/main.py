@@ -40,6 +40,8 @@ from .rag import (
     citation_from_row,
     insufficient_evidence,
     prepare_generation_context,
+    relevant_passage,
+    small_talk,
     validate_generation,
 )
 from .records import record_excerpt, validate_record
@@ -56,6 +58,7 @@ PRIVATE_INGESTION = REPOSITORY_ROOT / "data" / "private" / "ingest"
 async def lifespan(application):
     async with request_client() as client:
         application.state.http_client = client
+        await drain_cleanup_jobs()
         yield
     application.state.http_client = None
 
@@ -105,6 +108,23 @@ async def integration_failure_handler(_request: Request, exc: IntegrationFailure
             "The answer service returned an unusable response. Please retry."
         ),
         "retrieval_unavailable": "Authorized search is unavailable. No answer was generated.",
+        "provider_authentication_failed": (
+            "The provider rejected its configuration. Contact the workspace administrator."
+        ),
+        "provider_invalid_model": "No configured generation model is available to this account.",
+        "provider_invalid_request": "The provider rejected the generation request.",
+        "provider_safety_block": "The provider declined this request. No answer was released.",
+        "session_expired": "Your session expired. Sign in again to continue.",
+        "authorization_denied": "Your current access does not permit this action.",
+        "migration_required": (
+            "The workspace database schema is unavailable. "
+            "Ask the administrator to apply local migrations."
+        ),
+        "database_unavailable": "The workspace database is temporarily unavailable. Please retry.",
+        "evidence_changed": (
+            "Source access or content changed during this request. "
+            "Search again to use current evidence."
+        ),
     }
     content: dict[str, object] = {
         "detail": messages.get(
@@ -112,9 +132,33 @@ async def integration_failure_handler(_request: Request, exc: IntegrationFailure
         ),
         "code": exc.code,
     }
+    if exc.stage == "embedding":
+        content["stage"] = "embedding"
+        content["detail"] = (
+            "Embedding failed; the source was not published. "
+            "Retry later or ask the administrator to check the provider configuration."
+        )
     if exc.timing_ms is not None:
         content["timing_ms"] = exc.timing_ms
-    return JSONResponse(status_code=503, content=content)
+    if exc.retry_after is not None:
+        content["retry_after_seconds"] = exc.retry_after
+    if exc.provider_status:
+        content["provider_status"] = exc.provider_status
+    statuses = {
+        "provider_rate_limited": 429,
+        "session_expired": 401,
+        "authorization_denied": 403,
+        "provider_authentication_failed": 502,
+        "provider_invalid_model": 502,
+        "provider_invalid_request": 502,
+        "provider_invalid_response": 502,
+        "provider_safety_block": 422,
+    }
+    return JSONResponse(
+        status_code=statuses.get(exc.code, 503),
+        content=content,
+        headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else {},
+    )
 
 
 @app.exception_handler(httpx.HTTPError)
@@ -135,6 +179,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     request_id: str
     conversation_id: str | None = None
+    message: str | None = None
     state: str
     claims: list[dict[str, object]]
     trace: dict[str, object]
@@ -182,7 +227,16 @@ async def _rest_rows(
         headers=_rest_headers(settings, token) | (headers or {}),
     )
     if response.is_error:
-        raise IntegrationFailure("Authorized workspace data is unavailable")
+        code = (
+            "session_expired"
+            if response.status_code == 401
+            else "authorization_denied"
+            if response.status_code == 403
+            else "migration_required"
+            if response.status_code == 404
+            else "database_unavailable"
+        )
+        raise IntegrationFailure("Authorized workspace data is unavailable", code=code)
     return response
 
 
@@ -236,6 +290,10 @@ async def _identity(client: httpx.AsyncClient, settings, token: str) -> dict[str
                 for row in rows
                 if isinstance(row, dict) and isinstance(row.get("name"), str)
             ]
+    if not roles:
+        raise HTTPException(
+            status_code=403, detail="No workspace role has been assigned to this account"
+        )
     profile = profiles[0]
     return {
         "user_id": user_id,
@@ -285,36 +343,54 @@ async def _context_token(
         raise HTTPException(
             status_code=403, detail="This demo role is not available to your identity"
         )
-    if not _local_demo_enabled():
-        raise HTTPException(status_code=403, detail="Demo role contexts are available only locally")
+    if identity["role"] != "CEO" or not _local_demo_enabled():
+        raise HTTPException(status_code=403, detail="Only the local demo CEO may switch contexts")
 
-    cache = getattr(app.state, "demo_role_sessions", {})
-    cached = cache.get(role)
-    if cached and cached["expires_at"] > time.monotonic() + 60:
-        return str(cached["access_token"]), role
+    # Demo infrastructure only. Bind every brokered session to this actor and
+    # organization; verify the target's current membership on every reuse.
     try:
         credentials = json.loads(DEMO_CREDENTIALS.read_text())
-        target = credentials.get(role)
-    except (OSError, ValueError):
-        target = None
-    if not isinstance(target, dict) or not target.get("email") or not target.get("password"):
-        raise HTTPException(status_code=503, detail="Local demo role credentials are unavailable")
-    response = await client.post(
-        f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
-        params={"grant_type": "password"},
-        headers={"apikey": settings.supabase_publishable_key.get_secret_value()},
-        json={"email": target["email"], "password": target["password"]},
-    )
-    if response.is_error:
-        raise HTTPException(status_code=503, detail="Local demo role session is unavailable")
-    session = response.json()
-    access_token = session.get("access_token")
-    if not isinstance(access_token, str):
-        raise HTTPException(status_code=503, detail="Local demo role session is invalid")
-    cache[role] = {
-        "access_token": access_token,
-        "expires_at": time.monotonic() + int(session.get("expires_in", 3600)),
-    }
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Demo context is unavailable") from exc
+    target = credentials.get(role)
+    actor = credentials.get(str(identity["role"]))
+    if (
+        not isinstance(target, dict)
+        or not isinstance(actor, dict)
+        or identity.get("email") != actor.get("email")
+    ):
+        raise HTTPException(status_code=403, detail="Demo context is unavailable")
+    cache = getattr(app.state, "demo_role_sessions", {})
+    cache_key = (str(identity["user_id"]), str(identity["organization_id"]), role)
+    cached = cache.get(cache_key)
+    if cached and cached["expires_at"] > time.monotonic() + 60:
+        access_token = str(cached["access_token"])
+    else:
+        response = await client.post(
+            f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
+            params={"grant_type": "password"},
+            headers={"apikey": settings.supabase_publishable_key.get_secret_value()},
+            json={"email": target["email"], "password": target["password"]},
+        )
+        if response.is_error:
+            raise HTTPException(status_code=503, detail="Local demo role session is unavailable")
+        session = response.json()
+        access_token = session.get("access_token")
+        if not isinstance(access_token, str):
+            raise HTTPException(status_code=503, detail="Local demo role session is invalid")
+        cached = {
+            "access_token": access_token,
+            "expires_at": time.monotonic() + int(session.get("expires_in", 3600)),
+        }
+    target_identity = await _identity(client, settings, access_token)
+    if (
+        target_identity["organization_id"] != identity["organization_id"]
+        or target_identity["role"] != role
+        or target_identity.get("email") != target["email"]
+    ):
+        cache.pop(cache_key, None)
+        raise HTTPException(status_code=403, detail="Demo context is unavailable")
+    cache[cache_key] = cached
     app.state.demo_role_sessions = cache
     return access_token, role
 
@@ -400,10 +476,29 @@ async def workspace_summary(
             raise HTTPException(status_code=503, detail="Authorized source list is unavailable")
         content_range = chunks_response.headers.get("content-range", "*/0").rsplit("/", 1)[-1]
         chunk_count = int(content_range) if content_range.isdigit() else 0
+    async with request_client() as client:
+        history = await _history_rows(client, settings, token, identity, active_role)
+        activity = await _rest_rows(
+            client,
+            settings,
+            token,
+            "security_events",
+            params={
+                "user_id": f"eq.{identity['user_id']}",
+                "organization_id": f"eq.{identity['organization_id']}",
+                "active_role": f"eq.{active_role}",
+                "select": "kind,outcome,created_at",
+                "order": "created_at.desc",
+                "limit": "5",
+            },
+        )
     recent = [
-        entry
-        for entry in _activity_for(str(identity["user_id"]))
-        if entry.get("active_role") == active_role
+        {
+            "query": item["query"],
+            "state": item["response"].get("state", "unknown"),
+            "created_at": item["created_at"],
+        }
+        for item in reversed(history)
     ]
     latest_evaluation_status = "not run"
     if EVALUATION_RESULTS.is_file():
@@ -419,7 +514,9 @@ async def workspace_summary(
     return {
         "identity": identity,
         "active_role": active_role,
-        "document_count": len(documents),
+        "document_count": int(docs_response.headers.get("content-range", "*/0").rsplit("/", 1)[-1])
+        if docs_response.headers.get("content-range", "").rsplit("/", 1)[-1].isdigit()
+        else len(documents),
         "chunk_count": chunk_count,
         "structured_record_count": len(
             {
@@ -429,6 +526,7 @@ async def workspace_summary(
             }
         ),
         "documents": documents,
+        "security_activity": activity.json(),
         "recent_queries": [
             {
                 "query": item.get("query"),
@@ -440,9 +538,15 @@ async def workspace_summary(
         "authorization": "active" if identity["role"] != "Unassigned" else "unassigned",
         "api": "connected",
         "supabase": "connected",
-        "gemini": "configured; availability not checked"
-        if settings.gemini_api_key
-        else "not configured",
+        "gemini": (
+            getattr(app.state, "provider_status", {}).get("state")
+            or (
+                "configured; availability not checked"
+                if settings.gemini_api_key
+                else "not configured"
+            )
+        ),
+        "provider_check": getattr(app.state, "provider_status", None),
         "ingestion": "ready"
         if _local_demo_enabled() and settings.supabase_secret_key
         else "local admin key unavailable",
@@ -462,19 +566,31 @@ async def security_status(
     async with request_client() as client:
         identity = await _identity(client, settings, token)
         _, active_role = await _context_token(client, settings, token, identity, demo_role)
+    async with request_client() as client:
+        events = await _rest_rows(
+            client,
+            settings,
+            token,
+            "security_events",
+            params={
+                "user_id": f"eq.{identity['user_id']}",
+                "organization_id": f"eq.{identity['organization_id']}",
+                "active_role": f"eq.{active_role}",
+                "select": "id,kind,outcome,evidence_count,created_at,active_role",
+                "order": "created_at.desc",
+                "limit": "30",
+            },
+        )
     trace = [
         {
-            "created_at": item.get("created_at"),
-            "query_id": item.get("request_id"),
-            "state": item.get("state"),
-            "active_role": item.get("active_role", "unknown"),
-            "authorized_evidence_count": item.get("evidence_count", 0),
-            "decision": "authorized retrieval"
-            if item.get("evidence_count", 0)
-            else "no authorized evidence",
+            "created_at": item["created_at"],
+            "query_id": item["id"],
+            "state": item["outcome"],
+            "active_role": item["active_role"],
+            "authorized_evidence_count": item.get("evidence_count"),
+            "decision": f"{item['kind']}: {item['outcome']}",
         }
-        for item in _activity_for(str(identity["user_id"]))
-        if item.get("active_role") == active_role
+        for item in events.json()
     ]
     return {
         "identity": identity,
@@ -706,9 +822,17 @@ async def _store_ingested(
         await client.delete(
             f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
         )
-        raise HTTPException(
-            status_code=503, detail="Embedding failed; the source was not published"
-        ) from exc
+        if isinstance(exc, IntegrationFailure):
+            exc.stage = "embedding"
+            raise
+        failure = IntegrationFailure(
+            "Embedding transport failed",
+            code="provider_timeout"
+            if isinstance(exc, httpx.TimeoutException)
+            else "provider_unavailable",
+        )
+        failure.stage = "embedding"
+        raise failure from exc
     chunk_payload = []
     for candidate, embedding in zip(candidates, embeddings, strict=True):
         chunk_payload.append(
@@ -716,7 +840,7 @@ async def _store_ingested(
                 "organization_id": organization_id,
                 "document_id": source_id,
                 "source_type": candidate.source_type,
-                "source_name": candidate.source_name,
+                "source_name": source_name,
                 "source_id": candidate.source_id,
                 "page_number": candidate.page_number,
                 "row_id": candidate.row_id,
@@ -846,7 +970,10 @@ async def ingest_file(
     except HTTPException:
         stored_path.unlink(missing_ok=True)
         raise
-    except (httpx.HTTPError, IntegrationFailure) as exc:
+    except IntegrationFailure:
+        stored_path.unlink(missing_ok=True)
+        raise
+    except httpx.HTTPError as exc:
         stored_path.unlink(missing_ok=True)
         raise HTTPException(status_code=503, detail="Ingestion service is unavailable") from exc
     return {"state": "indexed", **result}
@@ -929,6 +1056,46 @@ async def query_knowledge(
     return await _run_query(request, authorization, demo_role)
 
 
+async def revalidate_evidence(client, settings, token, evidence):
+    if not evidence:
+        return []
+    ids = [str(UUID(str(row["chunk_id"]))) for row in evidence]
+    response = await _rest_rows(
+        client,
+        settings,
+        token,
+        "knowledge_chunks",
+        params={
+            "id": f"in.({','.join(ids)})",
+            "select": "id,content,source_name,source_type,source_id,document_id,metadata,"
+            "page_number,row_id,image_id,ocr_region",
+            "limit": "100",
+        },
+    )
+    current = {row["id"]: row for row in response.json()}
+    # Drop changed rows as well as revoked/deleted rows. No stale snapshot is sent.
+    return [
+        row
+        for row in evidence
+        if row["chunk_id"] in current
+        and all(
+            row.get(key) == current[row["chunk_id"]].get(key)
+            for key in (
+                "content",
+                "source_name",
+                "source_type",
+                "source_id",
+                "document_id",
+                "page_number",
+                "row_id",
+                "image_id",
+                "ocr_region",
+                "metadata",
+            )
+        )
+    ]
+
+
 async def _run_query(request, authorization, demo_role, emit=None, verified=None):
     async def progress(stage, **details):
         if emit:
@@ -941,11 +1108,11 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
     preliminary_auth_ms = (time.perf_counter() - request_started) * 1000 if verified else 0
     timings: dict[str, float | None] = {
         "auth_session_ms": 0.0,
-        "embedding_ms": 0.0,
-        "retrieval_and_ranking_ms": 0.0,
+        "embedding_ms": None,
+        "retrieval_and_ranking_ms": None,
         "ranking_only_ms": None,
-        "gemini_ms": 0.0,
-        "citation_validation_ms": 0.0,
+        "gemini_ms": None,
+        "citation_validation_ms": None,
     }
 
     async with request_client() as client:
@@ -977,6 +1144,34 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 timings["auth_session_ms"] = round(
                     preliminary_auth_ms + (time.perf_counter() - auth_started) * 1000, 1
                 )
+            greeting = small_talk(request.query)
+            if greeting:
+                response = QueryResponse(
+                    request_id=request_id,
+                    conversation_id=str(request.conversation_id or uuid4()),
+                    state="SMALL_TALK",
+                    message=greeting,
+                    claims=[],
+                    trace={
+                        "active_role": active_role,
+                        "session_verified": True,
+                        "database_request_used_user_session": False,
+                        "evidence_items_sent_to_model": 0,
+                        "generation_model": None,
+                        "fallback_used": False,
+                        "timing_ms": timings,
+                        "ranking_timing_note": (
+                            "No company data or model was used for this greeting."
+                        ),
+                    },
+                )
+                response.trace["history_saved"] = await _save_history(
+                    actor_token, identity, active_role, request.query, response
+                )
+                response.trace["timing_ms"]["total_ms"] = round(
+                    (time.perf_counter() - request_started) * 1000, 1
+                )
+                return response
             await progress("searching_knowledge")
             embedding_started = time.perf_counter()
             try:
@@ -993,8 +1188,16 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                     (time.perf_counter() - retrieval_started) * 1000, 1
                 )
             await progress("retrieval_complete", evidence_count=len(evidence))
+            await progress("checking_references")
+            recheck_started = time.perf_counter()
+            evidence = await revalidate_evidence(client, settings, access_token, evidence)
+            timings["evidence_revalidation_ms"] = round(
+                (time.perf_counter() - recheck_started) * 1000, 1
+            )
             prompt, model_context = prepare_generation_context(request.query, evidence)
-            if not model_context:
+            if not model_context or not any(
+                relevant_passage(request.query, row) for row in model_context
+            ):
                 result = insufficient_evidence()
                 model_context: list[dict[str, object]] = []
                 generation_model = None
@@ -1003,12 +1206,39 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 await progress("generating_response")
                 generation_started = time.perf_counter()
                 try:
-                    model_output = await generate_claims(client, settings, prompt)
+
+                    async def before_attempt():
+                        nonlocal model_context
+                        current_identity = await _identity(client, settings, actor_token)
+                        scoped, current_role = await _context_token(
+                            client, settings, actor_token, current_identity, demo_role
+                        )
+                        if (
+                            current_identity["organization_id"] != identity["organization_id"]
+                            or current_role != active_role
+                        ):
+                            raise HTTPException(status_code=403, detail="Access context changed")
+                        fresh = await revalidate_evidence(client, settings, scoped, evidence)
+                        new_prompt, model_context = prepare_generation_context(request.query, fresh)
+                        if not model_context:
+                            raise IntegrationFailure(
+                                "Evidence changed before generation", code="evidence_changed"
+                            )
+                        return new_prompt
+
+                    model_output = await generate_claims(
+                        client, settings, prompt, before_attempt=before_attempt
+                    )
                 finally:
                     timings["gemini_ms"] = round(
                         (time.perf_counter() - generation_started) * 1000, 1
                     )
                 generation_model = model_output.get("_model")
+                app.state.provider_status = {
+                    "state": "available",
+                    "model": generation_model,
+                    "checked_at": datetime.now(UTC).isoformat(),
+                }
                 fallback_used = model_output.get("_fallback_used") is True
                 await progress("validating_citations")
                 validation_started = time.perf_counter()
@@ -1023,6 +1253,16 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             LOGGER.warning("Knowledge upstream failed [%s]: %s", request_id, type(exc).__name__)
             raise HTTPException(status_code=503, detail="Knowledge service unavailable") from exc
         except IntegrationFailure as exc:
+            if exc.code.startswith("provider_"):
+                app.state.provider_status = {
+                    "state": exc.code,
+                    "checked_at": datetime.now(UTC).isoformat(),
+                }
+            if "identity" in locals() and "active_role" in locals():
+                await record_security_event(
+                    identity, active_role, "query", exc.code, len(locals().get("model_context", []))
+                )
+            exc.evidence = [citation_from_row(row) for row in locals().get("model_context", [])]
             exc.timing_ms = timings | {
                 "total_ms": round((time.perf_counter() - request_started) * 1000, 1)
             }
@@ -1034,6 +1274,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             )
             raise
 
+    await record_security_event(identity, active_role, "query", result["state"], len(model_context))
     created_at = datetime.now(UTC).isoformat()
     _append_activity(
         {
@@ -1080,6 +1321,148 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
         (time.perf_counter() - request_started) * 1000, 1
     )
     return response
+
+
+async def record_security_event(identity, role, kind, outcome, evidence_count=None):
+    settings = get_settings()
+    if not settings.supabase_secret_key:
+        return False
+    key = settings.supabase_secret_key.get_secret_value()
+    try:
+        async with request_client() as client:
+            response = await client.post(
+                f"{settings.supabase_url.rstrip('/')}/rest/v1/security_events",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                json={
+                    "user_id": identity["user_id"],
+                    "organization_id": identity["organization_id"],
+                    "active_role": role,
+                    "kind": kind,
+                    "outcome": outcome,
+                    "evidence_count": evidence_count,
+                },
+            )
+        return not response.is_error
+    except (httpx.HTTPError, IntegrationFailure):
+        LOGGER.warning("Security event persistence unavailable")
+        return False
+
+
+@app.middleware("http")
+async def audit_workspace_actions(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    kind = (
+        "source_read"
+        if path.startswith("/api/v1/sources/")
+        else "ingestion"
+        if path.startswith("/api/v1/ingest/")
+        else "context_switch"
+        if path == "/api/v1/demo/switch"
+        else None
+    )
+    if kind and request.headers.get("authorization"):
+        try:
+            async with request_client() as client:
+                token = bearer_token(request.headers.get("authorization"))
+                identity = await _identity(client, get_settings(), token)
+                requested = request.headers.get("x-demo-role")
+                try:
+                    _, role = await _context_token(
+                        client, get_settings(), token, identity, requested
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 403:
+                        raise
+                    # Attribute a denied context request to the verified actor's
+                    # real role, never the forged requested context.
+                    role = str(identity["role"])
+            await record_security_event(
+                identity,
+                role,
+                kind,
+                "allowed" if response.status_code < 400 else "denied_or_failed",
+            )
+        except (HTTPException, IntegrationFailure, httpx.HTTPError):
+            pass  # Never attribute an unverified identity or supplied role to an event.
+    return response
+
+
+async def cleanup_source_original(client, settings, source_id, storage_path):
+    if storage_path:
+        path = (REPOSITORY_ROOT / storage_path).resolve()
+        # Immutable synthetic seed fixtures are retained; uploads are private and disposable.
+        if path.is_relative_to(PRIVATE_INGESTION.resolve()):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                return False
+    key = settings.supabase_secret_key.get_secret_value()
+    response = await client.patch(
+        f"{settings.supabase_url.rstrip('/')}/rest/v1/source_cleanup_jobs",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        params={"source_id": f"eq.{source_id}"},
+        json={"state": "complete"},
+    )
+    return not response.is_error
+
+
+async def drain_cleanup_jobs():
+    settings = get_settings()
+    if not _local_demo_enabled() or not settings.supabase_secret_key:
+        return
+    key = settings.supabase_secret_key.get_secret_value()
+    try:
+        async with request_client() as client:
+            response = await client.get(
+                f"{settings.supabase_url.rstrip('/')}/rest/v1/source_cleanup_jobs",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                params={"state": "eq.pending", "select": "source_id,storage_path", "limit": "100"},
+            )
+            if not response.is_error:
+                for job in response.json():
+                    await cleanup_source_original(
+                        client, settings, job["source_id"], job["storage_path"]
+                    )
+    except (httpx.HTTPError, IntegrationFailure):
+        LOGGER.warning("Private original cleanup deferred")
+
+
+@app.delete("/api/v1/sources/{source_id}", tags=["sources"])
+async def delete_source(
+    source_id: Annotated[UUID, ApiPath()],
+    authorization: str | None = Header(default=None),
+    demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
+):
+    settings = get_settings()
+    async with request_client() as client:
+        _, identity = await require_local_ceo(client, authorization, demo_role)
+        key = settings.supabase_secret_key.get_secret_value()
+        response = await client.post(
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/rpc/delete_local_source",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            json={
+                "target_source": str(source_id),
+                "target_org": identity["organization_id"],
+                "actor": identity["user_id"],
+            },
+        )
+        if response.is_error:
+            if response.status_code == 409:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This source has dependent business records. Remove those sources first."
+                    ),
+                )
+            raise IntegrationFailure("Source deletion is unavailable", code="database_unavailable")
+        deleted = response.json()
+        if deleted is None:
+            raise HTTPException(status_code=404, detail="Source not found")
+        cleaned = await cleanup_source_original(
+            client, settings, str(source_id), deleted.get("storage_path")
+        )
+    return {"state": "deleted", "original_cleanup": "complete" if cleaned else "pending"}
 
 
 @app.get("/api/v1/sources/{source_id}", tags=["sources"])
@@ -1308,11 +1691,16 @@ async def stream_query(
             result = await task
             yield f"event: result\ndata: {result.model_dump_json()}\n\n"
         except (IntegrationFailure, HTTPException) as exc:
-            code = exc.code if isinstance(exc, IntegrationFailure) else "request_failed"
-            error = {
-                "code": code,
-                "detail": "No unvalidated answer was released. Please retry later.",
-            }
+            if isinstance(exc, IntegrationFailure):
+                safe = await integration_failure_handler(None, exc)
+                error = json.loads(safe.body)
+                error["evidence"] = exc.evidence
+            else:
+                error = {
+                    "code": "session_expired" if exc.status_code == 401 else "request_failed",
+                    "detail": str(exc.detail),
+                    "status": exc.status_code,
+                }
             yield f"event: error\ndata: {json.dumps(error)}\n\n"
         except httpx.HTTPError:
             yield (
@@ -1471,6 +1859,9 @@ async def conversation(
                 row["query"], [{**item, "chunk_id": item["id"]} for item in current]
             )
             rebuilt = validate_generation({"claims": references}, canonical)
+            greeting = small_talk(row["query"])
+            if greeting:
+                rebuilt = {"state": "SMALL_TALK", "claims": [], "message": greeting}
             row["response"] = {
                 "request_id": row.get("id", str(uuid4())),
                 "conversation_id": str(conversation_id),

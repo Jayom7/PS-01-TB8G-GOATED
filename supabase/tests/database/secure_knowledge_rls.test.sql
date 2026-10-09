@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select plan(43);
+select plan(51);
 
 select ok(
   (select count(*) = 7 and bool_and(relrowsecurity)
@@ -241,5 +241,21 @@ reset role;
 delete from public.access_grants where chunk_id='50000000-0000-4000-8000-000000000006';
 set local role authenticated;
 select is((select count(*) from public.knowledge_chunks),0::bigint,'Chunk-only grant revocation takes effect');
+reset role;
+select ok(not has_table_privilege('authenticated','public.security_events','insert'),'Clients cannot forge security events');
+select ok(not has_table_privilege('anon','public.security_events','select'),'Anonymous audit access denied');
+select ok(not has_function_privilege('authenticated','public.delete_local_source(uuid,uuid,uuid)','execute'),'Client cannot call administrative deletion RPC');
+select ok(not has_table_privilege('authenticated','public.source_cleanup_jobs','select'),'Private original cleanup paths are server-only');
+set local role service_role;
+select ok(public.delete_local_source('40000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000004') is not null,'Local CEO deletion RPC succeeds');
+reset role;
+select is((select count(*) from public.knowledge_chunks where document_id='40000000-0000-4000-8000-000000000006'),0::bigint,'Transactional deletion removes all source chunks');
+set local role authenticated;
+set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000004"}';
+set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000004';
+select is((select count(*) from public.security_events),1::bigint,'Actor can read durable deletion event');
+set local "request.jwt.claims" = '{"role":"authenticated","sub":"20000000-0000-4000-8000-000000000003"}';
+set local "request.jwt.claim.sub" = '20000000-0000-4000-8000-000000000003';
+select is((select count(*) from public.security_events),0::bigint,'Other tenant cannot read audit event');
 select * from finish();
 rollback;

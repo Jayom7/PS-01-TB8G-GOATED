@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import math
+import time
 from typing import Any
 
 import httpx
 
 from .config import Settings
+from .rag import GENERATION_POLICY
 
 GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -17,7 +21,11 @@ class IntegrationFailure(Exception):
     def __init__(self, message: str, *, code: str = "upstream_unavailable") -> None:
         super().__init__(message)
         self.code = code
+        self.retry_after: int | None = None
+        self.provider_status: int | None = None
+        self.evidence: list[dict] = []
         self.timing_ms: dict[str, float | None] | None = None
+        self.stage: str | None = None
 
 
 async def verify_supabase_session(
@@ -84,7 +92,7 @@ async def _create_embedding(
         },
     )
     if response.is_error:
-        raise IntegrationFailure("Gemini embedding request failed", code="provider_unavailable")
+        raise provider_failure(response)
     try:
         body = response.json()
     except ValueError as exc:
@@ -143,26 +151,100 @@ async def retrieve_chunks(
     return rows
 
 
-async def generate_claims(
-    client: httpx.AsyncClient, settings: Settings, prompt: str
-) -> dict[str, Any]:
-    if not settings.gemini_api_key:
-        raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
-    models = list(
+_MODEL_INVENTORY: dict[str, tuple[float, set[str]]] = {}
+
+
+async def generation_models(client, settings):
+    key = settings.gemini_api_key.get_secret_value()
+    fingerprint = hashlib.sha256(key.encode()).hexdigest()
+    cached = _MODEL_INVENTORY.get(fingerprint)
+    if not cached or cached[0] < time.monotonic():
+        response = await client.get(
+            f"{GEMINI_API_ROOT}/models", headers={"x-goog-api-key": key}, timeout=5.0
+        )
+        if response.is_error:
+            raise provider_failure(response)
+        try:
+            available = {
+                m["name"].removeprefix("models/")
+                for m in response.json()["models"]
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            }
+        except (ValueError, TypeError, KeyError) as exc:
+            raise IntegrationFailure(
+                "Invalid model catalogue", code="provider_invalid_response"
+            ) from exc
+        _MODEL_INVENTORY[fingerprint] = (time.monotonic() + 300, available)
+    else:
+        available = cached[1]
+    configured = list(
         dict.fromkeys(
-            model.removeprefix("models/")
-            for model in (
-                settings.gemini_chat_model,
-                settings.gemini_fallback_chat_model,
-            )
-            if model
+            m.removeprefix("models/")
+            for m in (settings.gemini_chat_model, settings.gemini_fallback_chat_model)
+            if m
         )
     )
-    if not models:
-        raise IntegrationFailure(
-            "Gemini has no configured generation model", code="provider_unavailable"
+    eligible = [m for m in configured if m in available]
+    if not eligible:
+        raise IntegrationFailure("Configured models are unsupported", code="provider_invalid_model")
+    return eligible
+
+
+def provider_failure(response):
+    code = {
+        429: "provider_rate_limited",
+        401: "provider_authentication_failed",
+        403: "provider_authentication_failed",
+        404: "provider_invalid_model",
+        400: "provider_invalid_request",
+        504: "provider_timeout",
+    }.get(response.status_code, "provider_unavailable")
+    failure = IntegrationFailure(f"Gemini request failed (HTTP {response.status_code})", code=code)
+    failure.provider_status = response.status_code
+    try:
+        error = response.json().get("error", {})
+        details = error.get("details", [])
+        for detail in details:
+            delay = detail.get("retryDelay", "")
+            if delay.endswith("s"):
+                failure.retry_after = max(1, math.ceil(float(delay[:-1])))
+        header = response.headers.get("retry-after", "")
+        if header.isdigit():
+            failure.retry_after = int(header)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return failure
+
+
+def model_scoped_quota(response):
+    """Switch once only when all quota violations explicitly name this model.
+
+    Unknown/project/global quotas stop immediately; switching cannot fix them.
+    """
+    try:
+        details = response.json()["error"]["details"]
+        violations = [v for detail in details for v in detail.get("violations", [])]
+        return bool(violations) and all(
+            v.get("quotaDimensions", {}).get("model") for v in violations
         )
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+async def generate_claims(client, settings, prompt, before_attempt=None):
+    if not settings.gemini_api_key:
+        raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
+    try:
+        async with asyncio.timeout(settings.generation_budget_seconds):
+            return await _generate_bounded(client, settings, prompt, before_attempt)
+    except TimeoutError as exc:
+        raise IntegrationFailure("Generation budget exceeded", code="provider_timeout") from exc
+
+
+async def _generate_bounded(client, settings, prompt, before_attempt=None):
+    models = await generation_models(client, settings)
     payload = {
+        "systemInstruction": {"parts": [{"text": GENERATION_POLICY}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
@@ -175,10 +257,7 @@ async def generate_claims(
                         "items": {
                             "type": "OBJECT",
                             "properties": {
-                                "evidence_ids": {
-                                    "type": "ARRAY",
-                                    "items": {"type": "STRING"},
-                                },
+                                "evidence_ids": {"type": "ARRAY", "items": {"type": "STRING"}}
                             },
                             "required": ["evidence_ids"],
                         },
@@ -188,66 +267,52 @@ async def generate_claims(
             },
         },
     }
-    response = None
-    used_model = models[0]
-    fallback_used = False
-    last_failure: IntegrationFailure | None = None
-    for model_index, model in enumerate(models):
-        used_model = model
-        fallback_used = model_index > 0
+    for index, model in enumerate(models):
+        if before_attempt:
+            payload["contents"][0]["parts"][0]["text"] = await before_attempt()
         try:
             response = await client.post(
                 f"{GEMINI_API_ROOT}/models/{model}:generateContent",
                 headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
                 json=payload,
-                timeout=httpx.Timeout(15.0, connect=5.0),
+                timeout=httpx.Timeout(12.0, connect=5.0),
             )
-        except httpx.TimeoutException as exc:
-            last_failure = IntegrationFailure(
-                "Gemini generation timed out", code="provider_timeout"
-            )
-            if model_index + 1 < len(models):
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            if index + 1 < len(models):
+                await asyncio.sleep(0.25)
                 continue
-            raise last_failure from exc
-        except httpx.TransportError as exc:
-            last_failure = IntegrationFailure(
-                "Gemini could not be reached", code="provider_unavailable"
-            )
-            if model_index + 1 < len(models):
-                continue
-            raise last_failure from exc
-        if response.status_code in {500, 502, 503, 504} and model_index + 1 < len(models):
-            continue
-        if response.is_error:
-            code = (
-                "provider_rate_limited"
-                if response.status_code == 429
-                else "provider_timeout"
-                if response.status_code == 504
-                else "provider_unavailable"
-            )
             raise IntegrationFailure(
-                f"Gemini generation is temporarily unavailable (HTTP {response.status_code})",
-                code=code,
+                "Gemini transport failed",
+                code=(
+                    "provider_timeout"
+                    if isinstance(exc, httpx.TimeoutException)
+                    else "provider_unavailable"
+                ),
+            ) from exc
+        if response.is_error:
+            failure = provider_failure(response)
+            retryable = response.status_code in {404, 500, 502, 503, 504} or (
+                response.status_code == 429 and model_scoped_quota(response)
             )
+            if retryable and index + 1 < len(models):
+                # A different model is a different quota bucket; never retry this
+                # exhausted model before its RetryInfo interval has elapsed.
+                await asyncio.sleep(0.25)
+                continue
+            raise failure
         try:
             body = response.json()
-            candidates = body.get("candidates") if isinstance(body, dict) else None
-            model_text = candidates[0]["content"]["parts"][0]["text"]
-            output = json.loads(model_text)
+            if body.get("promptFeedback", {}).get("blockReason"):
+                raise IntegrationFailure("Provider safety block", code="provider_safety_block")
+            candidate = body["candidates"][0]
+            if candidate.get("finishReason") in {"SAFETY", "RECITATION", "PROHIBITED_CONTENT"}:
+                raise IntegrationFailure("Provider safety block", code="provider_safety_block")
+            output = json.loads("".join(p.get("text", "") for p in candidate["content"]["parts"]))
+            if not isinstance(output, dict) or not isinstance(output.get("claims"), list):
+                raise ValueError("Invalid claims")
         except (IndexError, KeyError, TypeError, ValueError) as exc:
-            last_failure = IntegrationFailure(
-                "Gemini returned malformed structured output", code="provider_invalid_response"
-            )
-            raise last_failure from exc
-        if not isinstance(output, dict):
-            last_failure = IntegrationFailure(
-                "Gemini returned malformed structured output", code="provider_invalid_response"
-            )
-            raise last_failure
-        output["_model"] = used_model
-        output["_fallback_used"] = fallback_used
-        return output
-    if last_failure:
-        raise last_failure
-    raise IntegrationFailure("Gemini generation failed", code="provider_unavailable")
+            raise IntegrationFailure(
+                "Malformed structured output", code="provider_invalid_response"
+            ) from exc
+        return output | {"_model": model, "_fallback_used": model != settings.gemini_chat_model}
+    raise IntegrationFailure("No eligible model", code="provider_invalid_model")

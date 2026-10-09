@@ -19,7 +19,14 @@ def test_hit_rate_uses_only_positive_queries_and_locations_are_metadata_checks()
             "forbidden_source_hits": [],
             "latency_ms": 10,
         }
-        for hit, rank in [(True, 1.0), (False, 0.0), (True, 0.5), (True, 0.25), (True, 0.0)]
+        for hit, rank in [
+            (True, 1.0),
+            (False, 0.0),
+            (True, 0.5),
+            (True, 0.25),
+            (True, 0.0),
+            (True, 1.0),
+        ]
     ]
     results.append(
         {
@@ -34,16 +41,21 @@ def test_hit_rate_uses_only_positive_queries_and_locations_are_metadata_checks()
         {"chunk_id": "no-location", "source_type": "structured"},
     ]
     result = SUMMARY(results, rows)
-    assert result["retrieval_hit_rate_at_k"] == 0.75
-    assert result["mean_reciprocal_rank"] == 0.438
-    assert result["positive_query_count"] == 4
+    assert result["retrieval_hit_rate_at_k"] == 0.8
+    assert result["mean_reciprocal_rank"] == 0.55
+    assert result["positive_query_count"] == 5
     assert "retrieval_recall_at_k" not in result
     assert result["measured_checks"]["retrieved_citation_locations_present"] == 1
     assert result["measured_checks"]["retrieved_citation_locations_checked"] == 2
     assert "citation_provenance_valid" not in result["measured_checks"]
     assert result["authorization_violations"] == 0
+    assert result["measured_checks"]["cross_modal_retrieval"] is False
+    results[5]["source_types_found"] = ["pdf", "image_ocr", "structured"]
+    assert SUMMARY(results, rows)["measured_checks"]["cross_modal_retrieval"] is True
+    results[5]["hit"] = False
+    assert SUMMARY(results, rows)["measured_checks"]["cross_modal_retrieval"] is False
     results[4]["forbidden_source_hits"] = ["forbidden"]
-    results[5]["unauthorized_chunk_rows"] = 2
+    results[6]["unauthorized_chunk_rows"] = 2
     assert SUMMARY(results, rows)["authorization_violations"] == 3
 
 

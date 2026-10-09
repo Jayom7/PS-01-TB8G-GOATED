@@ -597,3 +597,27 @@ svg { flex-shrink: 0; }
   .conversation-controls .quiet-button { min-height: 44px; }
   .dashboard-identity > div { flex: 1 0 calc(100% - 52px); }
 }
+
+/* Sequential operational progress and compact evidence recovery. */
+.current-progress { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; padding: 16px 0; }
+.progress-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: operational-pulse 1.4s ease-in-out infinite; }
+@keyframes operational-pulse { 50% { opacity: .3; transform: scale(.8); } }
+@media (prefers-reduced-motion: reduce) { .progress-dot { animation: none; } }
+.retry-evidence { margin: 16px 0; color: var(--muted); font-size: 13px; }
+.retry-evidence summary { cursor: pointer; color: var(--ink); }
+.retry-evidence button { display: block; margin: 8px 0; text-align: left; }
+.primary-navigation { flex: 1; min-height: 0; overflow-y: auto; align-content: start; }
+.rail-footer { flex-shrink: 0; }
+@media (max-height: 600px) { .rail-security-note { display: none; } .navigation-rail { padding-top: 12px; } .account-popover { max-height: calc(100dvh - 125px); overflow-y: auto; } }
+
+.danger-text { margin-left: 16px; color: var(--error); }
+.delete-confirm { padding: 24px; line-height: 1.65; }
+.confirmation-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 28px; }
+.source-notice { color: var(--ink); font-size: 13px; padding: 12px 0; }
+
+.oauth-button { width: 100%; min-height: 42px; color: var(--ink); background: var(--surface); border: 1px solid var(--control-border); border-radius: var(--radius-md); font-weight: 550; }
+.oauth-button:disabled { color: var(--muted); cursor: not-allowed; }
+.auth-divider { margin: 24px 0 16px; text-align: center; color: var(--muted); font-size: 12px; }
+.auth-link { display: inline-block; margin-top: 20px; color: var(--accent); font-size: 13px; text-underline-offset: 3px; }
+.auth-configuration, .auth-message { font-size: 13px; line-height: 1.6; color: var(--muted); }
+.auth-message { color: var(--ink); padding: 12px 0; }

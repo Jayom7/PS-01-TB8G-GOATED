@@ -40,7 +40,7 @@ def main() -> None:
         + api_url
         + "\nNEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="
         + values["PUBLISHABLE_KEY"]
-        + "\nNEXT_PUBLIC_API_BASE_URL=http://localhost:8000\n"
+        + "\nNEXT_PUBLIC_API_BASE_URL=\nAPI_INTERNAL_URL=http://127.0.0.1:8000\n"
     )
     print("Configured ignored apps/web/.env.local for local Supabase and FastAPI.")
 

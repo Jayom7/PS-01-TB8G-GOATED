@@ -1,6 +1,7 @@
 "use client";
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
+import { AuthFrame } from "@/components/auth-frame";
 import { createClient } from "@/lib/supabase/client";
 
 export default function ForgotPasswordPage() {
@@ -20,5 +21,5 @@ export default function ForgotPasswordPage() {
     } catch { setError("Authentication is unavailable. Please try again when the connection recovers."); }
     finally { setBusy(false); }
   }
-  return <main className="login-shell"><section className="login-content"><Link className="brand-name login-brand" href="/login">Clearframe</Link><h1>Reset your password</h1><p className="login-intro">We’ll send a recovery link to your organization email.</p><form className="login-form" onSubmit={submit}><label htmlFor="email">Email</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />{message && <p className="auth-message" role="status">{message}</p>}{error && <p className="login-error" role="alert">{error}</p>}<button className="login-submit" disabled={busy}>{busy ? "Sending…" : "Send recovery link"}</button></form><Link className="auth-link" href="/login">Back to sign in</Link></section></main>;
+  return <AuthFrame><section className="login-content"><Link className="brand-name login-brand" href="/login">Clearframe</Link><h1>Reset your password</h1><p className="login-intro">We’ll send a recovery link to your organization email.</p><form className="login-form" onSubmit={submit}><label htmlFor="email">Email</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />{message && <p className="auth-message" role="status">{message}</p>}{error && <p className="login-error" role="alert">{error}</p>}<button className="login-submit" disabled={busy}>{busy ? "Sending…" : "Send recovery link"}</button></form><Link className="auth-link" href="/login">Back to sign in</Link></section></AuthFrame>;
 }

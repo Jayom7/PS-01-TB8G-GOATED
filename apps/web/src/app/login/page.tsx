@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { AuthFrame } from "@/components/auth-frame";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
@@ -48,7 +49,7 @@ function LoginForm() {
   }
 
   return (
-    <main className="login-shell">
+    <AuthFrame>
       <section className="login-content" aria-labelledby="login-title">
         <Link className="brand-name login-brand" href="/" aria-label="Clearframe home">Clearframe</Link>
         <h1 id="login-title">Sign in to your workspace</h1>
@@ -86,7 +87,7 @@ function LoginForm() {
         <Link className="auth-link" href="/forgot-password">Forgot password?</Link>
         <p className="auth-configuration">Access is provisioned by your organization. Signing in never grants a workspace role automatically.</p>
       </section>
-    </main>
+    </AuthFrame>
   );
 }
 

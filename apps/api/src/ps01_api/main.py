@@ -14,10 +14,10 @@ from urllib.parse import unquote, urlparse
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import get_settings
@@ -1187,6 +1187,7 @@ async def _source_payload(row, authorization, demo_role):
 @app.get("/api/v1/sources/{source_id}/original", tags=["sources"])
 async def source_original(
     source_id: Annotated[UUID, ApiPath()],
+    page: Annotated[int | None, Query(ge=1, le=100)] = None,
     authorization: str | None = Header(default=None),
     demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ):
@@ -1217,6 +1218,15 @@ async def source_original(
     path = original_path(doc)
     if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="Source not found")
+    if page is not None:
+        if doc["source_type"] != "pdf":
+            raise HTTPException(status_code=404, detail="Page not found")
+        png = await asyncio.to_thread(render_pdf_page, path, page)
+        return Response(
+            png,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     media = (
         "application/pdf"
         if doc["source_type"] == "pdf"
@@ -1229,6 +1239,18 @@ async def source_original(
         media_type=media,
         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
     )
+
+
+def render_pdf_page(path: Path, page: int) -> bytes:
+    import pymupdf
+
+    with pymupdf.open(path) as document:
+        if page > len(document):
+            raise HTTPException(status_code=404, detail="Page not found")
+        source = document[page - 1]
+        # Bound raster dimensions even when an uploaded PDF has an unusually large page.
+        scale = min(1.5, 1600 / max(source.rect.width, source.rect.height, 1))
+        return source.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("png")
 
 
 def original_path(doc):

@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ps01_api.ingestion import IngestionError
-from ps01_api.main import app, original_path
+from ps01_api.main import app, original_path, render_pdf_page
 from ps01_api.records import record_excerpt, validate_record
 
 IDENTITY = {"user_id": "actor", "organization_id": "org", "role": "CEO", "roles": ["CEO"]}
@@ -82,7 +82,8 @@ def test_original_preview_traversal_is_never_resolved():
     )
 
 
-def test_original_preview_requires_document_grant_and_denies_without_metadata():
+@pytest.mark.parametrize("suffix", ["", "?page=1"])
+def test_original_preview_requires_document_grant_and_denies_without_metadata(suffix):
     with (
         patch("ps01_api.main._local_demo_enabled", return_value=True),
         patch("ps01_api.main._identity", AsyncMock(return_value=IDENTITY)),
@@ -90,11 +91,29 @@ def test_original_preview_requires_document_grant_and_denies_without_metadata():
             "ps01_api.main._rest_rows", AsyncMock(return_value=httpx.Response(200, json=[]))
         ) as rows,
     ):
-        response = TestClient(app).get(f"/api/v1/sources/{ID}/original", headers=HEADERS)
+        response = TestClient(app).get(f"/api/v1/sources/{ID}/original{suffix}", headers=HEADERS)
     assert response.status_code == 404
     assert response.json() == {"detail": "Source not found"}
     assert rows.await_args.args[3] == "documents"
     assert rows.await_args.args[2] == "actor-token"
+
+
+def test_pdf_page_preview_renders_exact_page_and_rejects_missing_page(tmp_path):
+    import pymupdf
+
+    path = tmp_path / "two-pages.pdf"
+    with pymupdf.open() as document:
+        document.new_page(width=200, height=300)
+        document.new_page(width=400, height=500)
+        document.save(path)
+    preview = pymupdf.Pixmap(render_pdf_page(path, 2))
+    assert preview.width == 600
+    assert preview.height == 750
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as missing:
+        render_pdf_page(path, 3)
+    assert missing.value.status_code == 404
 
 
 def test_structured_record_key_and_scope_are_server_owned():

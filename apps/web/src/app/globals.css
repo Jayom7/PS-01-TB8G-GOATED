@@ -580,8 +580,20 @@ svg { flex-shrink: 0; }
 @media (max-width: 700px) { .navigation-rail { visibility: hidden; } .navigation-rail.navigation-open { visibility: visible; } }
 
 .mobile-source-open { display: none; }
-@media (max-width: 700px) {
+@media (max-width: 1000px) {
+  .sources-toolbar { flex-direction: column; align-items: stretch; gap: var(--space-3); }
+  .sources-filters { flex-wrap: wrap; }
+  .source-search { flex: 1 0 100%; }
   .knowledge-table th:nth-child(n+3), .knowledge-table td:nth-child(n+3) { display: none; }
   .knowledge-table td:first-child { min-width: 0; width: 60%; }
-  .knowledge-table .mobile-source-open { display: inline-block; margin-top: 8px; min-height: 36px; }
+  .knowledge-table .mobile-source-open { display: inline-block; margin-top: 8px; min-height: 44px; }
+}
+
+@media (max-width: 700px) {
+  .quiet-button, .primary-button, .primary-action, .send-button, .icon-button, .account-action,
+  .source-search, .source-type-filter select, .ingest-form input, .ingest-form select {
+    min-height: 44px;
+  }
+  .conversation-controls .quiet-button { min-height: 44px; }
+  .dashboard-identity > div { flex: 1 0 calc(100% - 52px); }
 }

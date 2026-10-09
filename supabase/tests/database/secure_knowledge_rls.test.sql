@@ -115,7 +115,9 @@ select ok(not has_table_privilege('authenticated','public.invoices','insert'), '
 select ok(not has_table_privilege('anon','public.invoices','select'), 'Anonymous users cannot inspect typed rows');
 select ok(not has_column_privilege('authenticated','public.query_history','response','update'), 'Stored responses are immutable to authenticated users');
 select ok(has_column_privilege('authenticated','public.query_history','deleted_at','update'), 'Owners can hide history');
-select throws_ok($$insert into public.knowledge_chunks (organization_id,document_id,source_type,source_name,source_id,chunk_index,content) values ('10000000-0000-4000-8000-000000000002','40000000-0000-4000-8000-000000000001','pdf','forged','forged',0,'forged')$$, '23503', null, 'Cross-organization chunk/document relationship fails');
+-- Use a distinct chunk index so the tenant FK, rather than a duplicate index,
+-- is the constraint this assertion exercises.
+select throws_ok($$insert into public.knowledge_chunks (organization_id,document_id,source_type,source_name,source_id,chunk_index,content) values ('10000000-0000-4000-8000-000000000002','40000000-0000-4000-8000-000000000001','pdf','forged','forged',99,'forged')$$, '23503', null, 'Cross-organization chunk/document relationship fails');
 insert into public.query_history (conversation_id,user_id,organization_id,active_role,query,response) values
 ('60000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','Finance Manager','Terms?','{}');
 

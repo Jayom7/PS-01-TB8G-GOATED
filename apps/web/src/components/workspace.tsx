@@ -238,9 +238,12 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     try {
       setError(null);
       const data = await apiGet<WorkspaceData>("/api/v1/workspace", activeRole || undefined);
-      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setWorkspace(data);
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) {
+        setWorkspace(data);
+        setError(null);
+      }
     } catch (cause) {
-      setError(networkMessage(cause, "Workspace information is unavailable."));
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setError(networkMessage(cause, "Workspace information is unavailable."));
     }
   }, [activeRole]);
 
@@ -451,7 +454,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     const controller = new AbortController();
     let objectUrl: string | null = null;
     void currentToken().then(async (token) => {
-      const response = await fetch(`${API_BASE}${activeSource.preview_path}`, {
+      const page = activeSource.source_type === "pdf" ? `?page=${activeSource.location.page ?? 1}` : "";
+      const response = await fetch(`${API_BASE}${activeSource.preview_path}${page}`, {
         headers: { Authorization: `Bearer ${token}`, ...(activeRole ? { "X-Demo-Role": activeRole } : {}) },
         signal: controller.signal, cache: "no-store",
       });
@@ -489,10 +493,17 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     setPending(true);
     setError(null);
     try {
-      const data = await apiGet<{ sources: Source[] }>("/api/v1/sources", activeRole || undefined);
-      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setSources(data.sources);
+      const [data, context] = await Promise.all([
+        apiGet<{ sources: Source[] }>("/api/v1/sources", activeRole || undefined),
+        apiGet<WorkspaceData>("/api/v1/workspace", activeRole || undefined),
+      ]);
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) {
+        setWorkspace(context);
+        setSources(data.sources);
+        setError(null);
+      }
     } catch (cause) {
-      setError(networkMessage(cause, "Authorized sources are unavailable."));
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) setError(networkMessage(cause, "Authorized sources are unavailable."));
     } finally {
       setPending(false);
     }
@@ -501,8 +512,18 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   const loadSecurity = useCallback(async () => {
     setPending(true);
     setError(null);
-    try { const data = await apiGet<SecurityData>("/api/v1/security", activeRole || undefined); if (activeRoleRef.current === activeRole) setSecurity(data); }
-    catch (cause) { setError(networkMessage(cause, "Security status is unavailable.")); }
+    try {
+      const [data, context] = await Promise.all([
+        apiGet<SecurityData>("/api/v1/security", activeRole || undefined),
+        apiGet<WorkspaceData>("/api/v1/workspace", activeRole || undefined),
+      ]);
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) {
+        setWorkspace(context);
+        setSecurity(data);
+        setError(null);
+      }
+    }
+    catch (cause) { if (!activeRoleRef.current || activeRoleRef.current === activeRole) setError(networkMessage(cause, "Security status is unavailable.")); }
     finally { setPending(false); }
   }, [activeRole]);
 
@@ -510,9 +531,16 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     setPending(true);
     setError(null);
     try {
-      const data = await apiGet<{ state: string; result: EvaluationData | null }>("/api/v1/evaluation", activeRole || undefined);
-      if (activeRoleRef.current === activeRole) setEvaluation(data.result);
-    } catch (cause) { setError(networkMessage(cause, "Evaluation state is unavailable.")); }
+      const [data, context] = await Promise.all([
+        apiGet<{ state: string; result: EvaluationData | null }>("/api/v1/evaluation", activeRole || undefined),
+        apiGet<WorkspaceData>("/api/v1/workspace", activeRole || undefined),
+      ]);
+      if (!activeRoleRef.current || activeRoleRef.current === activeRole) {
+        setWorkspace(context);
+        setEvaluation(data.result);
+        setError(null);
+      }
+    } catch (cause) { if (!activeRoleRef.current || activeRoleRef.current === activeRole) setError(networkMessage(cause, "Evaluation state is unavailable.")); }
     finally { setPending(false); }
   }, [activeRole]);
 
@@ -584,7 +612,9 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       await refreshWorkspace();
       setSources(null);
     } catch (cause) {
-      setError(networkMessage(cause, "Structured record indexing failed. Check the fields and retry."));
+      setError(cause instanceof SyntaxError
+        ? "Record fields must be valid JSON. Check quoted keys and commas, then retry."
+        : networkMessage(cause, "Structured record indexing failed. Check the fields and retry."));
     } finally { setPending(false); }
   }
 
@@ -743,7 +773,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           <dl className="source-facts"><div><dt>Type</dt><dd>{sourceTypeLabel(activeSource.source_type)}</dd></div><div><dt>Access</dt><dd>Current context · {role}</dd></div></dl>
           <p className="source-excerpt">{activeSource.excerpt}</p>
           {activeSource.record_fields && <dl className="record-preview">{Object.entries(activeSource.record_fields).map(([key, value]) => <div key={key}><dt>{key.replace("_minor_units", "").replaceAll("_", " ")}</dt><dd>{formatRecordField(key, value, activeSource.record_fields?.currency)}</dd></div>)}</dl>}
-          {previewUrl && (activeSource.source_type === "pdf" ? <iframe title="Original PDF preview" className="original-preview" src={`${previewUrl}#page=${activeSource.location.page ?? 1}`} /> : <OriginalImage url={previewUrl} region={activeSource.location.region} />)}
+          {previewUrl && (activeSource.source_type === "pdf" ? <OriginalImage url={previewUrl} page={typeof activeSource.location.page === "number" ? activeSource.location.page : 1} /> : <OriginalImage url={previewUrl} region={activeSource.location.region} />)}
           {previewError && <p className="request-status" role="status">{previewError}</p>}
         </article>}
         <div className="drawer-policy"><Icon name="lock" size={16} /><div><strong>Why this source is available</strong><p>Your current access includes this source. The database checks access again when you open its original.</p></div></div>
@@ -879,7 +909,7 @@ function SecurityView({ data, pending, error, onRefresh }: { data: SecurityData 
 
 function EvaluationView({ data, pending, error, role, onRefresh, onRun }: { data: EvaluationData | null; pending: boolean; error: string | null; role: string; onRefresh: () => void; onRun: () => void }) {
   return <div className="data-page"><PageHeading title="Evaluation" description="Local synthetic smoke results for retrieval and authorization; not a production benchmark." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
-    {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : <><h2>No evaluation run recorded</h2><p>Run the real retrieval suite to measure hit rate, ranking, modality coverage, and authorization boundaries.</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Running evaluation…" : "Run evaluation"}</button>{role !== "CEO" && <small>Switch to the CEO access context to inspect or run the local test suite.</small>}</div> : <>
+    {!data ? <div className="evaluation-empty"><Icon name="chart" size={22} />{error ? <p className="request-error" role="alert">{error}</p> : pending ? <p role="status">Loading evaluation state…</p> : <><h2>No evaluation run recorded</h2><p>Run the real retrieval suite to measure hit rate, ranking, modality coverage, and authorization boundaries.</p></>}<button className="primary-action" type="button" disabled={pending || role !== "CEO"} onClick={onRun}>{pending ? "Checking evaluation…" : "Run evaluation"}</button>{role !== "CEO" && <small>Switch to the CEO access context to inspect or run the local test suite.</small>}</div> : <>
       <div className="evaluation-scope"><p className="evaluation-run-label"><Icon name="chart" size={15} />{data.run_kind === "historical_legacy" ? "Historical saved run · legacy labels corrected; not rerun" : data.run_kind === "fresh_local" ? "Fresh local synthetic run" : "Recorded local synthetic run; not rerun on refresh"}</p><div className="evaluation-observations"><span>Checked authorization cases · {data.authorization_violations} forbidden hits</span><span>Retrieved citation locations · {String(data.measured_checks?.retrieved_citation_locations_present ?? "not measured")} / {String(data.measured_checks?.retrieved_citation_locations_checked ?? "not measured")} present</span><span>Mean latency · {formatLatency(data.measured_checks?.mean_latency_ms)}</span></div></div>
       <div className="evaluation-summary"><div><span>Dataset</span><strong>{data.dataset}</strong></div><div><span>Queries</span><strong>{data.query_count}</strong></div><div><span>Hit rate@{data.top_k}</span><strong>{formatMetric(data.retrieval_hit_rate_at_k)}</strong></div><div><span>Mean reciprocal rank</span><strong>{formatMetric(data.mean_reciprocal_rank)}</strong></div><div><span>Checked forbidden hits</span><strong className={data.authorization_violations ? "metric-bad" : "metric-good"}>{data.authorization_violations}</strong></div></div>
       <div className="source-table-wrap"><table className="source-table evaluation-table"><thead><tr><th>Evaluation case</th><th>Role</th><th>Result</th><th>Latency</th><th>Forbidden hits</th></tr></thead><tbody>{data.results.map((row, index) => <tr key={`${String(row.name)}-${index}`}><td><strong>{String(row.name)}</strong></td><td>{String(row.role ?? "—")}</td><td><span className={`status-pill ${row.hit === true ? "status-good" : "status-bad"}`}>{row.hit === true ? "Pass" : "Review"}</span></td><td>{typeof row.latency_ms === "number" ? `${row.latency_ms} ms` : "—"}</td><td>{Array.isArray(row.forbidden_source_hits) ? row.forbidden_source_hits.length : "—"}</td></tr>)}</tbody></table></div>
@@ -935,14 +965,14 @@ function formatRecordField(key: string, value: unknown, currency: unknown) {
   return String(value ?? "Not set");
 }
 
-function OriginalImage({ url, region }: { url: string; region: unknown }) {
+function OriginalImage({ url, region, page }: { url: string; region?: unknown; page?: number }) {
   const [size, setSize] = useState({ width: 0, height: 0 });
   const box = region as Record<string, number> | null;
   const valid = box && size.width > 0 && size.height > 0 && [box.x_min, box.y_min, box.x_max, box.y_max].every(Number.isFinite) && box.x_min >= 0 && box.y_min >= 0 && box.x_max <= size.width && box.y_max <= size.height && box.x_max > box.x_min && box.y_max > box.y_min;
   return <div className="image-preview"><div className="image-original">
     {/* Original bytes are fetched with the current authorization headers. */}
     {/* eslint-disable-next-line @next/next/no-img-element */}
-    <img src={url} alt="Original authorized source" onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+    <img src={url} alt={page ? `Original authorized PDF · page ${page}` : "Original authorized source"} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
     {valid && <span className="ocr-highlight" aria-label="Cited OCR region" style={{ left: `${100 * box.x_min / size.width}%`, top: `${100 * box.y_min / size.height}%`, width: `${100 * (box.x_max - box.x_min) / size.width}%`, height: `${100 * (box.y_max - box.y_min) / size.height}%` }} />}
-  </div><p>{valid ? "Highlighted region identifies the cited OCR text." : "OCR region overlay unavailable for this source."}</p></div>;
+  </div><p>{page ? `Original PDF · page ${page}` : valid ? "Highlighted region identifies the cited OCR text." : "OCR region overlay unavailable for this source."}</p></div>;
 }

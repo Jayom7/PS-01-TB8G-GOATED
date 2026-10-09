@@ -94,3 +94,25 @@ def test_seed_prunes_only_removed_documents_with_local_demo_markers() -> None:
     assert requests[0].url.params.get("metadata->>local_demo_path") == "not.is.null"
     assert len(requests) == 2
     assert requests[1].url.params.get("id") == "eq.stale-demo"
+
+
+def test_database_json_field_order_does_not_change_business_row_identity(tmp_path, monkeypatch):
+    collect = runpy.run_path(str(SEED_SCRIPT))["collect_candidates"]
+    manifest = json.loads((CORPUS / "manifest.json").read_text())
+    sources = [source for source in manifest["sources"] if source["source_type"] == "structured"]
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"sources": sources}))
+    monkeypatch.setitem(collect.__globals__, "MANIFEST", manifest_path)
+    database_records, expected = {}, {}
+    for source in sources:
+        fixture = json.loads((CORPUS / source["path"]).read_text())
+        key = collect.__globals__["RECORD_KEYS"][fixture["table"]]
+        # PostgreSQL jsonb readback does not preserve fixture insertion order.
+        fixture["records"] = [dict(reversed(list(row.items()))) for row in fixture["records"]]
+        database_records[source["source_id"]] = fixture
+        expected[source["source_id"]] = fixture["records"][0][key]
+    candidates = collect(database_records)
+    assert len(candidates) == 7
+    assert all(
+        candidate.row_id == expected[source["source_id"]] for source, candidate in candidates
+    )

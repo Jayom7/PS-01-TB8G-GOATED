@@ -234,7 +234,7 @@ def collect_candidates(database_records=None) -> list[tuple[dict[str, object], C
             structured = (database_records or {}).get(source_id) or json.loads(path.read_text())
             candidates = []
             for record in structured["records"]:
-                row_id = str(next(iter(record.values())))
+                row_id = str(record[RECORD_KEYS[structured["table"]]])
                 fields = {key: value for key, value in record.items()}
                 candidates.extend(
                     structured_record_candidates(
@@ -475,10 +475,15 @@ async def main() -> None:
                     base_url,
                     service_key,
                     "knowledge_chunks",
-                    params={"document_id": f"eq.{document_id}", "select": "metadata"},
+                    params={"document_id": f"eq.{document_id}", "select": "row_id,metadata"},
                 )
-                if not existing or any(
-                    not row.get("metadata", {}).get("fields") for row in existing
+                expected_records = {
+                    str(row["fields"][primary_key]): row["fields"] for row in persisted
+                }
+                if {row.get("row_id") for row in existing} != set(expected_records) or any(
+                    row.get("metadata", {}).get("fields") != expected_records.get(row.get("row_id"))
+                    or row.get("metadata", {}).get("table") != table
+                    for row in existing
                 ):
                     refresh_source_ids.add(source["source_id"])
                     response = client.delete(

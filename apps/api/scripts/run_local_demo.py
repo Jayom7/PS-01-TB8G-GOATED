@@ -130,6 +130,8 @@ def main() -> int:
                     for kind, path in [
                         ("citation", foreign["id"]),
                         ("document", f"{foreign['document_id']}/preview"),
+                        ("original", f"{foreign['document_id']}/original"),
+                        ("rendered page", f"{foreign['document_id']}/original?page=1"),
                     ]:
                         hidden = client.get(f"{api}/api/v1/sources/{path}", headers=headers(role))
                         record(f"{role}: forbidden {kind} lookup", hidden.status_code == 404)
@@ -163,6 +165,20 @@ def main() -> int:
                 json={"query": "invoice", "role": "CEO", "evidence": []},
             )
             record("Client-supplied identity/evidence rejected", forged.status_code == 422)
+            contract = next(
+                row for row in rows_by_role["CEO"] if row["source_id"] == "ACM-MSA-2026-07"
+            )
+            pdf_page = client.get(
+                f"{api}/api/v1/sources/{contract['document_id']}/original?page=1",
+                headers=headers("CEO"),
+            )
+            record(
+                "Authorized exact PDF page renders without a browser PDF plugin",
+                pdf_page.status_code == 200
+                and pdf_page.headers.get("content-type") == "image/png"
+                and pdf_page.content.startswith(b"\x89PNG\r\n\x1a\n")
+                and pdf_page.headers.get("cache-control") == "no-store",
+            )
             # The live provider check is authorized for this fictional corpus,
             # not arbitrary uploads. Bind every visible document to its local
             # synthetic fixture before allowing any generation request.
@@ -219,6 +235,9 @@ def main() -> int:
                         and any("48000" in c["text"].replace(",", "") for c in result["claims"]),
                     )
                     allowed = {row["id"] for row in rows_by_role["Finance Manager"]}
+                    canonical = {
+                        row["id"]: row["content"] for row in rows_by_role["Finance Manager"]
+                    }
                     for claim in result["claims"]:
                         for citation in claim["citations"]:
                             preview = get(
@@ -230,7 +249,9 @@ def main() -> int:
                                 "Generated citation has authorized inspected evidence",
                                 citation["citation_id"] in allowed
                                 and bool(preview["excerpt"])
-                                and citation["title"] == preview["title"],
+                                and citation["title"] == preview["title"]
+                                and citation["location"] == preview["location"]
+                                and preview["excerpt"] == canonical[citation["citation_id"]],
                             )
                             inspected.append(
                                 {

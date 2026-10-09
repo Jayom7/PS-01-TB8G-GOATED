@@ -327,10 +327,156 @@ def insufficient_evidence() -> dict[str, Any]:
     return {"state": "INSUFFICIENT_EVIDENCE", "claims": []}
 
 
+def verified_evidence_response(query: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    """Conservative invoice extraction, never a substitute general-purpose generator.
+
+    Require one explicit invoice identity, every requested fact/modality, and
+    consistent values across the retrieved canonical evidence. Unknown intents,
+    ambiguous identities, poison and partial validation abstain. This is a
+    bounded business extractor, not semantic entailment.
+    """
+    q = query.casefold()
+    # Recognize only bounded invoice questions. Unrecognized additional facts
+    # must not silently become an apparently complete extractive answer.
+    allowed = set(
+        "what which is are the a an on in of for to and or its it does has have "
+        "this that as shown from using use cite all three source sources types "
+        "amount total how much invoice invoices contract payment terms term status "
+        "paid unpaid overdue scanned scan image ocr pdf database structured record "
+        "records row fresh please tell me show summarize summary state s".split()
+    )
+    for row in evidence:
+        customer = ((row.get("metadata") or {}).get("fields") or {}).get("customer", "")
+        allowed.update(re.findall(r"[a-z]+", str(customer).casefold()))
+        identity = str(row.get("_document_identity", ""))
+        customer_label = re.search(
+            r"Customer:\s*([A-Za-z][A-Za-z -]{0,80}?)"
+            r"(?=\s+(?:Invoice|Due|Currency|Payment|Supplier)\b|$)",
+            identity,
+        )
+        if customer_label:
+            allowed.update(re.findall(r"[a-z]+", customer_label[1].casefold()))
+    without_ids = re.sub(r"\b(?:[A-Z0-9]+-)?INV-\d+\b", "", q, flags=re.I)
+    if set(re.findall(r"[a-z0-9]+", without_ids)) - allowed:
+        return insufficient_evidence()
+    if literal_inspection(query) or re.search(
+        r"\b(?:salary|employee|secret|profit|forecast|predict|why|recommend)\b", q
+    ):
+        return insufficient_evidence()
+    requested = set()
+    if re.search(r"\b(?:amount|total)\b|how much", q):
+        requested.add("amount")
+    if re.search(r"\bterms?\b", q):
+        requested.add("terms")
+    if re.search(r"\b(?:paid|unpaid|overdue)\b|payment status", q):
+        requested.add("status")
+    if not requested or not re.search(r"\b(?:invoice|contract|payment)\b", q):
+        return insufficient_evidence()
+    modalities = set()
+    if re.search(r"\b(?:scanned|scan|image|ocr)\b", q):
+        modalities.add("image_ocr")
+    if re.search(r"\b(?:pdf|contract)\b", q):
+        modalities.add("pdf")
+    if re.search(r"\b(?:database|structured|record|row)\b", q):
+        modalities.add("structured")
+    candidates = []
+    for row in evidence:
+        if not relevant_passage(query, row):
+            continue
+        keys = _invoice_keys(row)
+        if len(keys) > 1:
+            return insufficient_evidence()
+        if len(keys) != 1:
+            continue
+        text = str(row.get("content", ""))
+        facts = {}
+        amount = re.search(
+            r"\binvoice\s+(?:total\s*:?|[\w-]+\b[^.]*?\btotals)\s*"
+            r"(USD|INR|EUR|GBP|\$)\s*([\d,]+(?:\.\d{2})?)",
+            text,
+            re.I,
+        )
+        if amount:
+            from decimal import Decimal, InvalidOperation
+
+            try:
+                facts["amount"] = (amount[1].upper(), Decimal(amount[2].replace(",", "")))
+                amounts = {
+                    (currency.upper(), Decimal(value.replace(",", "")))
+                    for currency, value in re.findall(
+                        r"(USD|INR|EUR|GBP|\$)\s*([\d,]+(?:\.\d{2})?)", text, re.I
+                    )
+                }
+                if len(amounts) != 1:
+                    return insufficient_evidence()
+            except InvalidOperation:
+                continue
+        terms = list(
+            re.finditer(
+                r"\bnet\s*(\d+)\b|\b(?:within|terms)\s+"
+                r"(\d+|thirty|fifteen|sixty|ninety)(?:\s*\(\d+\))?\s+(?:calendar\s+)?days\b",
+                text,
+                re.I,
+            )
+        )
+        if terms:
+            numbers = [(match[1] or match[2]).casefold() for match in terms]
+            values = {
+                {"thirty": "30", "fifteen": "15", "sixty": "60", "ninety": "90"}.get(number, number)
+                for number in numbers
+            }
+            if len(values) != 1:
+                return insufficient_evidence()
+            facts["terms"] = next(iter(values))
+        statuses = _payment_statuses(text)
+        if len(statuses) == 1:
+            # Overdue questions require the actual dated status, not unpaid alone.
+            overdue = re.search(r"Overdue as of that date:\s*(yes|no)", text, re.I)
+            if "overdue" not in q or overdue:
+                facts["status"] = (next(iter(statuses)), overdue[1].lower() if overdue else None)
+        if facts.keys() & requested:
+            candidates.append((row, keys, facts))
+    identities = set().union(*(keys for _, keys, _ in candidates)) if candidates else set()
+    query_ids = _invoice_keys({"content": query})
+    if len(identities) != 1 or (query_ids and query_ids != identities):
+        return insufficient_evidence()
+    chosen = []
+    for fact in sorted(requested):
+        supporting = [(row, facts[fact]) for row, _, facts in candidates if fact in facts]
+        # A missing overdue field is not a conflicting status; compare payment
+        # states independently, then dated overdue values when explicitly asked.
+        values = {
+            value if fact != "status" or "overdue" in q else value[0] for _, value in supporting
+        }
+        if len(values) != 1:
+            return insufficient_evidence()
+        preferred = {"amount": "image_ocr", "terms": "pdf", "status": "structured"}[fact]
+        supporting.sort(key=lambda item: item[0].get("source_type") != preferred)
+        chosen.append(supporting[0][0])
+    for modality in sorted(modalities - {row.get("source_type") for row in chosen}):
+        supporting = [
+            row
+            for row, _, facts in candidates
+            if row.get("source_type") == modality and facts.keys() & requested
+        ]
+        if not supporting:
+            return insufficient_evidence()
+        chosen.append(supporting[0])
+    chosen = list({row["evidence_id"]: row for row in chosen}.values())
+    result = validate_generation(
+        {"claims": [{"evidence_ids": [row["evidence_id"]]} for row in chosen]}, evidence
+    )
+    if result["state"] != "CITATION_VALIDATED":
+        return insufficient_evidence()
+    return result | {"state": "VERIFIED_EVIDENCE"}
+
+
 def small_talk(query):
     normalized = query.strip().casefold().rstrip(".!?")
-    if normalized in {"hi", "hello", "hey", "good morning", "good evening"}:
+    if normalized in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}:
         return "Hello! What would you like to find in your authorized company sources?"
-    if normalized in {"thanks", "thank you"}:
+    if normalized in {"thanks", "thank you", "thanks a lot", "thank you so much", "ty"}:
         return "You're welcome. I can help with another question about your authorized sources."
+    if normalized in {"what can you do", "who are you"}:
+        return "I’m Clearframe. I find cited answers in your authorized company sources."
     return None

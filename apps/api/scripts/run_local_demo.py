@@ -23,6 +23,22 @@ TARGETS = (
 REPORT = ROOT / "data/local/security-verification.json"
 
 
+def synthetic_corpus_is_bound(documents, fixture_hashes):
+    # Deletion may leave a strict subset. Verify every remaining document;
+    # never restore deleted data or allow unknown/duplicate uploads.
+    paths = [(doc.get("metadata") or {}).get("local_demo_path") for doc in documents]
+    return (
+        bool(documents)
+        and len(paths) == len(set(paths))
+        and all(
+            (doc.get("metadata") or {}).get("synthetic") is True
+            and path in fixture_hashes
+            and doc.get("content_hash") == fixture_hashes[path]
+            for doc, path in zip(documents, paths, strict=True)
+        )
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify the running local checkout without reseeding."
@@ -194,12 +210,7 @@ def main() -> int:
                 ).hexdigest()
                 for source in manifest["sources"]
             }
-            synthetic_only = len(documents.json()) == len(fixture_hashes) and all(
-                doc["metadata"].get("synthetic") is True
-                and doc["content_hash"]
-                == fixture_hashes.get(doc["metadata"].get("local_demo_path"))
-                for doc in documents.json()
-            )
+            synthetic_only = synthetic_corpus_is_bound(documents.json(), fixture_hashes)
             record(
                 "Provider context limited to file-hash-bound synthetic demo sources", synthetic_only
             )
@@ -224,13 +235,26 @@ def main() -> int:
                 else:
                     answer.raise_for_status()
                     result = answer.json()
-                    record(
-                        "Real Gemini finance amount with validated citations",
-                        result["state"] in {"CITATION_VALIDATED", "PARTIALLY_CITATION_VALIDATED"}
-                        and bool(result["trace"]["generation_model"])
-                        and bool(result["claims"])
-                        and any("48000" in c["text"].replace(",", "") for c in result["claims"]),
-                    )
+                    if result["state"] == "VERIFIED_EVIDENCE":
+                        blocked(
+                            "Real Gemini answer/source inspection",
+                            str(result["trace"]["provider_failure"]["code"]),
+                        )
+                        record(
+                            "Explicit generation-independent evidence response",
+                            result["trace"]["generation_model"] is None and bool(result["claims"]),
+                        )
+                    else:
+                        record(
+                            "Real Gemini finance amount with validated citations",
+                            result["state"]
+                            in {"CITATION_VALIDATED", "PARTIALLY_CITATION_VALIDATED"}
+                            and bool(result["trace"]["generation_model"])
+                            and bool(result["claims"])
+                            and any(
+                                "48000" in c["text"].replace(",", "") for c in result["claims"]
+                            ),
+                        )
                     allowed = {row["id"] for row in rows_by_role["Finance Manager"]}
                     canonical = {
                         row["id"]: row["content"] for row in rows_by_role["Finance Manager"]
@@ -243,7 +267,7 @@ def main() -> int:
                                 "Finance Manager",
                             )
                             record(
-                                "Generated citation has authorized inspected evidence",
+                                "Returned citation has authorized inspected evidence",
                                 citation["citation_id"] in allowed
                                 and bool(preview["excerpt"])
                                 and citation["title"] == preview["title"]
@@ -258,7 +282,7 @@ def main() -> int:
                                 }
                             )
                     record(
-                        "Inspected evidence contains the generated USD 48,000 amount",
+                        "Inspected evidence contains the returned USD 48,000 amount",
                         any(
                             "48000" in s["claim"].replace(",", "")
                             and "48000" in s["excerpt"].replace(",", "")

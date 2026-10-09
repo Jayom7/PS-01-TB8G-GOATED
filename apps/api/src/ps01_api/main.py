@@ -43,6 +43,7 @@ from .rag import (
     relevant_passage,
     small_talk,
     validate_generation,
+    verified_evidence_response,
 )
 from .records import record_excerpt, validate_record
 
@@ -1099,13 +1100,17 @@ async def revalidate_evidence(client, settings, token, evidence):
 
 
 async def _run_query(request, authorization, demo_role, emit=None, verified=None):
-    async def progress(stage, **details):
+    async def progress(stage):
         if emit:
-            await emit({"stage": stage, **details})
+            await emit({"stage": stage})
 
     request_id = str(uuid4())
     settings = get_settings()
     fallback_used = False
+    model_output = {}
+    provider_failure = None
+    sent_evidence_count = 0
+    final_access_checked = False
     request_started = verified[3] if verified else time.perf_counter()
     preliminary_auth_ms = (time.perf_counter() - request_started) * 1000 if verified else 0
     timings: dict[str, float | None] = {
@@ -1189,7 +1194,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 timings["retrieval_and_ranking_ms"] = round(
                     (time.perf_counter() - retrieval_started) * 1000, 1
                 )
-            await progress("retrieval_complete", evidence_count=len(evidence))
+            await progress("retrieval_complete")
             await progress("checking_references")
             recheck_started = time.perf_counter()
             evidence = await revalidate_evidence(client, settings, access_token, evidence)
@@ -1204,50 +1209,83 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 model_context: list[dict[str, object]] = []
                 generation_model = None
             else:
-                await progress("evidence_selected", evidence_count=len(model_context))
+                await progress("evidence_selected")
                 await progress("generating_response")
                 generation_started = time.perf_counter()
                 try:
 
-                    async def before_attempt():
-                        nonlocal model_context
+                    async def current_evidence():
                         current_identity = await _identity(client, settings, actor_token)
                         scoped, current_role = await _context_token(
                             client, settings, actor_token, current_identity, demo_role
                         )
                         if (
-                            current_identity["organization_id"] != identity["organization_id"]
+                            current_identity["user_id"] != identity["user_id"]
+                            or current_identity["organization_id"] != identity["organization_id"]
                             or current_role != active_role
                         ):
                             raise HTTPException(status_code=403, detail="Access context changed")
-                        fresh = await revalidate_evidence(client, settings, scoped, evidence)
+                        return await revalidate_evidence(client, settings, scoped, evidence)
+
+                    async def before_attempt():
+                        nonlocal model_context, sent_evidence_count
+                        fresh = await current_evidence()
                         new_prompt, model_context = prepare_generation_context(request.query, fresh)
-                        if not model_context:
+                        if not any(relevant_passage(request.query, row) for row in model_context):
                             raise IntegrationFailure(
                                 "Evidence changed before generation", code="evidence_changed"
                             )
+                        sent_evidence_count = len(model_context)
                         return new_prompt
 
-                    model_output = await generate_claims(
-                        client, settings, prompt, before_attempt=before_attempt
-                    )
+                    try:
+                        model_output = await generate_claims(
+                            client, settings, prompt, before_attempt=before_attempt
+                        )
+                    except IntegrationFailure as exc:
+                        if exc.code not in {
+                            "provider_unavailable",
+                            "provider_timeout",
+                            "provider_rate_limited",
+                        }:
+                            raise
+                        provider_failure = exc
                 finally:
                     timings["gemini_ms"] = round(
                         (time.perf_counter() - generation_started) * 1000, 1
                     )
                 generation_model = model_output.get("_model")
                 app.state.provider_status = {
-                    "state": "available",
+                    "state": provider_failure.code if provider_failure else "available",
                     "model": generation_model,
                     "checked_at": datetime.now(UTC).isoformat(),
                 }
                 fallback_used = model_output.get("_fallback_used") is True
+                await progress("checking_final_access")
+                final_started = time.perf_counter()
+                fresh = await current_evidence()
+                _, model_context = prepare_generation_context(request.query, fresh)
+                final_access_checked = True
+                timings["final_evidence_revalidation_ms"] = round(
+                    (time.perf_counter() - final_started) * 1000, 1
+                )
+                if provider_failure:
+                    await progress("composing_verified_evidence")
                 await progress("validating_citations")
                 validation_started = time.perf_counter()
-                result = validate_generation(model_output, model_context)
-                timings["citation_validation_ms"] = round(
-                    (time.perf_counter() - validation_started) * 1000, 1
-                )
+                try:
+                    if provider_failure:
+                        result = verified_evidence_response(request.query, model_context)
+                        if not result["claims"]:
+                            # Keep the precise provider error when safe extraction
+                            # cannot support a complete answer.
+                            raise provider_failure
+                    else:
+                        result = validate_generation(model_output, model_context)
+                finally:
+                    timings["citation_validation_ms"] = round(
+                        (time.perf_counter() - validation_started) * 1000, 1
+                    )
         except httpx.TimeoutException as exc:
             LOGGER.warning("Knowledge request timed out [%s]", request_id)
             raise HTTPException(status_code=503, detail="Knowledge service timed out") from exc
@@ -1264,7 +1302,11 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 await record_security_event(
                     identity, active_role, "query", exc.code, len(locals().get("model_context", []))
                 )
-            exc.evidence = [citation_from_row(row) for row in locals().get("model_context", [])]
+            # Only the post-provider recheck may supply error source links. A
+            # failed check must not release stale titles/excerpts from the prompt.
+            exc.evidence = (
+                [citation_from_row(row) for row in model_context] if final_access_checked else []
+            )
             exc.timing_ms = timings | {
                 "total_ms": round((time.perf_counter() - request_started) * 1000, 1)
             }
@@ -1292,19 +1334,55 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
     )
 
     conversation_id = str(request.conversation_id or uuid4())
-    await progress("validation_complete", state=result["state"])
+    await progress("validation_complete")
     response = QueryResponse(
         request_id=request_id,
         conversation_id=conversation_id,
         state=result["state"],
+        message=(
+            "Verified evidence response: composed without a language model because "
+            + {
+                "provider_unavailable": "the model provider is unavailable.",
+                "provider_timeout": "the model provider timed out.",
+                "provider_rate_limited": "the model provider is rate-limited.",
+            }[provider_failure.code]
+            + " Open citations to inspect the sources."
+            + (
+                f" Retry model generation after {provider_failure.retry_after} seconds."
+                if provider_failure.retry_after
+                else ""
+            )
+            if provider_failure
+            else None
+        ),
         claims=result["claims"],
         trace={
             "session_verified": True,
             "database_request_used_user_session": True,
-            "evidence_items_sent_to_model": len(model_context),
+            "evidence_items_sent_to_model": sent_evidence_count,
             "generation_model": generation_model,
             "fallback_used": fallback_used,
-            "generation_attempts": model_output.get("_attempts", []) if generation_model else [],
+            "generation_attempts": (
+                provider_failure.model_attempts
+                if provider_failure
+                else model_output.get("_attempts", [])
+            ),
+            "response_mode": (
+                "verified_evidence"
+                if provider_failure
+                else "model_generated"
+                if result["claims"]
+                else "abstention"
+            ),
+            "provider_failure": (
+                {
+                    "code": provider_failure.code,
+                    "provider_status": provider_failure.provider_status,
+                    "retry_after_seconds": provider_failure.retry_after,
+                }
+                if provider_failure
+                else None
+            ),
             "active_role": active_role,
             "timing_ms": timings
             | {"total_ms": round((time.perf_counter() - request_started) * 1000, 1)},
@@ -1881,6 +1959,14 @@ async def conversation(
                 row["query"], [{**item, "chunk_id": item["id"]} for item in current]
             )
             rebuilt = validate_generation({"claims": references}, canonical)
+            if saved.get("state") == "VERIFIED_EVIDENCE":
+                # The saved mode/text is not proof of a provider failure. Re-run
+                # the deterministic extractor on currently visible references.
+                rebuilt = verified_evidence_response(row["query"], canonical)
+                rebuilt["message"] = (
+                    "Verified evidence response: reconstructed without a language model. "
+                    "History replay did not rerun provider availability."
+                )
             greeting = small_talk(row["query"])
             if greeting:
                 rebuilt = {"state": "SMALL_TALK", "claims": [], "message": greeting}

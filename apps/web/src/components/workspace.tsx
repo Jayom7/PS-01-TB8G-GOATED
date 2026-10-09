@@ -20,7 +20,7 @@ type QueryResult = {
   request_id: string;
   conversation_id?: string;
   message?: string;
-  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "INSUFFICIENT_EVIDENCE";
+  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "VERIFIED_EVIDENCE" | "INSUFFICIENT_EVIDENCE";
   claims: Claim[];
   trace: {
     session_verified: boolean;
@@ -865,7 +865,7 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
   historyLoading: boolean; retryEvidence: Citation[];
   historyError: string | null; onReopen: (id: string) => void; onRemove: (id: string) => void;
 }) {
-  const progressLabel: Record<string, string> = {connecting: "Preparing the question", checking_access: "Preparing the question", access_checked: "Preparing the question", searching_knowledge: "Searching authorized sources", retrieval_complete: "Checking source references", checking_references: "Checking source references", evidence_selected: "Checking source references", generating_response: "Writing the grounded answer", validating_citations: "Checking source references", validation_complete: "Finishing the conversation"};
+  const progressLabel: Record<string, string> = {connecting: "Preparing the question", checking_access: "Checking access", access_checked: "Access checked", searching_knowledge: "Searching authorized sources", retrieval_complete: "Search complete", checking_references: "Checking source references", evidence_selected: "Evidence selected", generating_response: "Selecting evidence with the model", checking_final_access: "Rechecking source access", composing_verified_evidence: "Composing a verified evidence response", validating_citations: "Checking citations", validation_complete: "Finishing the conversation"};
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -880,6 +880,7 @@ function AskView({ identity, role, query, setQuery, askedQuery, result, pending,
       {messages.length ? <div className="message-thread" aria-live="polite">{messages.map((turn) => <div className="conversation-turn" key={turn.response.request_id}>
         <div className="question-bubble"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{turn.query}</p></div>
         {turn.response.state === "SMALL_TALK" ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>Conversation helper · no company-data lookup</small></div></div> : turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className="answer-label">From your authorized sources</h2>
+        {turn.response.state === "VERIFIED_EVIDENCE" && <p className="response-secondary">{turn.response.message}</p>}
         {turn.response.claims.map((claim, index) => <p key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citation.citation_id}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citation.citation_id)}: ${citation.title ?? "Source"}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citation.citation_id)}]</button>)}</p>)}
         <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
         {turn.response.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Some selected evidence could not be validated. Only accepted excerpts are shown.</p>}

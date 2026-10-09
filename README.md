@@ -4,13 +4,13 @@ Clearframe implements PS-01, a secure multimodal RAG workspace for NovaCore Indu
 
 Repository: [Jayom7/PS-01-TB8G-GOATED](https://github.com/Jayom7/PS-01-TB8G-GOATED). Existing SSH remote retained; no duplicate repository or hosted deployment.
 
-## Current evidence — 2026-10-09
+## Current evidence — 2026-10-09 acceptance pass
 
-**VERIFIED LOCALLY:** 76 backend tests, Ruff check/format, frontend ESLint, TypeScript, and production build. Real local extraction produced 45 candidates from 19 synthetic sources: 8 PDF chunks, 30 image OCR regions, and 7 structured fixture records. These are extraction counts, not freshly persisted database counts.
+**VERIFIED LOCALLY:** 79 backend tests, Ruff check/format, frontend ESLint, TypeScript, production build, 43/43 local pgTAP assertions, and 50 live authorization/source checks. The documented launcher runs local Supabase, API and web. All three local migrations are applied. The real persisted corpus contains 19 sources, 45 embedded chunks and 7 typed relational rows; five role sessions and protected PDF/OCR/record previews work.
 
-**BLOCKED:** Docker engine is unavailable; local Postgres at 54322 refuses connections. The new additive migration, 43-assertion pgTAP suite, five-role live database checks, and clean end-to-end restart are not verified. Gemini model inventory returned HTTP 200 for configured 3.8 Flash and 3.7 Flash IDs, but one bounded synthetic generation attempt ended in HTTP 503 after the single fallback. No fresh successful answer, HR refusal, or live injection outcome is claimed. Hosted Supabase is **UNVERIFIED**.
+**LIVE ANSWERS BLOCKED:** A full `./scripts/verify_demo` attempt reached Gemini HTTP 503 after the configured fallback. A subsequent bounded raw diagnostic returned HTTP 429 `RESOURCE_EXHAUSTED`: the `gemini-3.8-flash` free-tier generation request limit was 20, with a reported retry interval of 22h 48m 46s. Embeddings worked; no fresh successful generated answer, answer-citation audit, HR generated refusal or live injection outcome is claimed. The latest `--skip-generation` run intentionally exits 2: 50 checks passed and 2 generation checks were blocked. Hosted Supabase was untouched and remains unverified.
 
-Browser checks covered actual public login plus a separate, explicitly labeled UI fixture server for all six workspace routes, both themes, desktop/tablet/mobile, role controls, history, and evidence overlays. Fixture screenshots establish layout and interactions only. Previous database/provider results are **RECORDED BUT NOT FRESH**.
+All six real authenticated routes were inspected at 1440×900, 820×900 and 390×844 in light/dark modes. Live role switching, source filtering/sorting, protected previews, overlay closing/focus, account/logout controls, empty history and draft reset were exercised. Fresh images in `docs/design/live-*.png` show the real app. Populated answer/history/trace states remain blocked. Older fixture screenshots and provider results are historical.
 
 ## Implementation
 

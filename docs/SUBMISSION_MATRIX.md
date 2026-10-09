@@ -1,29 +1,38 @@
-# PS-01 Submission Matrix — 2026-10-09
+# PS-01 Submission Matrix — 2026-10-09 acceptance pass
 
-**IMPLEMENTED** means repository code/schema exists. **VERIFIED LOCALLY** identifies the specific executed unit, extraction, build, or browser check. **RECORDED BUT NOT FRESH** refers to older runtime artifacts. **UNVERIFIED** means no current evidence. **BLOCKED** identifies an attempted check prevented by a dependency. No status below certifies hosted security.
+Code snapshot: `f825075`. IMPLEMENTED describes inspected code; VERIFIED describes checks executed in this pass. BLOCKED identifies an attempted dependency failure or an explicitly skipped dependent check. Hosted behavior is unverified. Historical reports do not override this matrix.
 
-| Official requirement | Implementation / code location | Database mechanism | Test / fresh evidence | Demo evidence | Status |
-|---|---|---|---|---|---|
-| PDF ingestion | `ingestion.py:extract_pdf`, `main.py` file ingest | documents + page-located knowledge_chunks | Real extraction: 8 PDF chunks; parser/unit tests | Contract PDF and exact page | IMPLEMENTED; extraction VERIFIED LOCALLY; persistence BLOCKED |
-| Image + OCR ingestion | `ingestion.py:extract_image_ocr`, decode/size guards | image_id + ocr_region in unified chunks | Real extraction: 30 OCR regions; malformed/oversize image tests | Scanned Acme invoice, original and region overlay | IMPLEMENTED; extraction VERIFIED LOCALLY; live indexing BLOCKED |
-| Structured DB records | `records.py`, `seed_local_demo.py`, new relational migration | Seven typed tables, business PKs, tenant/source FKs, invoker origin view | Fixture/business-key/snapshot tests; live typed seed blocked | invoices / ACM-INV-2048 with persisted fields | IMPLEMENTED; unit checks VERIFIED LOCALLY; SQL/persistence BLOCKED |
-| Unified vector + metadata index | `integrations.py:retrieve_chunks`, base migration | vector(1536), HNSW, GIN, hybrid invoker RPC | Context/retrieval adapter tests; 19 sources / 45 extraction candidates | Sources console, cross-modal evidence | IMPLEMENTED; live index BLOCKED |
-| Natural-language answering | `main.py:_run_query`, `rag.py`, `integrations.py` | User-scoped retrieval provides model input | 76 backend tests; inventory HTTP 200; generation HTTP 503 | OCR amount and contract/row question | IMPLEMENTED; local adapters VERIFIED LOCALLY; successful live answer BLOCKED |
-| Retrieval-time row/document ACL | Base policies + restrictive structured policy; role broker | RLS applies during RPC selection; chunk/document grants; same-org origin constraints | 43 pgTAP assertions prepared, cannot connect to 54322; API auth/escalation tests pass | Finance/HR contrast, forbidden citation/original lookup | IMPLEMENTED; API checks VERIFIED LOCALLY; current DB proof BLOCKED; earlier 24/24 RECORDED BUT NOT FRESH |
-| Unauthorized evidence never enters context | `main.py`, `rag.py:prepare_generation_context` | Only caller/broker invoker results enter bounded context | Unit tests capture exact context, forged requests denied, no elevated query retrieval | Security boundary and trace | IMPLEMENTED; context construction VERIFIED LOCALLY; live RLS-dependent guarantee BLOCKED |
-| Exact source citations | `rag.py:validate_generation`, protected source endpoints | Located chunk IDs, current typed fields, document policy | Unknown/mixed IDs, fabricated text/quotes, missing locations, payment conflicts, preview denial tests | Open canonical excerpt, PDF page, OCR region, row fields | IMPLEMENTED; validator VERIFIED LOCALLY; live generated citations BLOCKED |
-| Hallucination/grounding demonstration | ID-only selection, backend extractive rendering, bounded invoice conflict guard | Canonical retrieved content and provenance | Valid/unsupported/cross-modal contradiction regressions pass | Inspector shows selected source text | Extractive provenance VERIFIED LOCALLY; general entailment/relevance UNVERIFIED; live injection outcome BLOCKED |
-| Architecture demonstration | `ARCHITECTURE.md`, `DATA_MODEL.md`, Security and Trace UI | Auth, invoker RPC/RLS, pgvector/full text, typed origin | Source/schema inspection; tests; labeled UI fixture audit | Security → trace → evidence inspector | IMPLEMENTED; documentation/UI VERIFIED LOCALLY; deployed DB status BLOCKED; hosted UNVERIFIED |
-
-## Supporting product and reproducibility checks
-
-| Surface | Fresh verification | Remaining boundary |
+| Official requirement | Actual implementation and fresh evidence | Verified status / remaining boundary |
 |---|---|---|
-| Login | Actual dev and production public page, desktop/mobile | Live credential login blocked by Auth runtime |
-| Overview / Ask / Sources / Ingest / Security / Evaluation | All routes, light/dark, desktop/tablet/mobile via isolated labeled fixtures | Fixtures do not establish Auth/RLS/provider/persistence success |
-| Evidence / trace / navigation / account | Escape, close button, outside click, focus trap/return, five role controls; source sorting/filtering | Real role brokering and revoked live source access require database |
-| Conversation history | Ownership/context API tests, replay rebuilding, malformed/forged/revoked content tests; fixture replay/new controls | Actual persistence and restart verification blocked; recent 200-turn bound |
-| Startup / verification | `scripts/dev`, `scripts/verify_demo`, `verify_services.py`; shell syntax and clear Docker-unavailable exit | Clean full-stack restart blocked; no OS/runtime changes made |
-| Evaluation | Historical report displayed as recorded; failure state visible; metric semantics corrected | Fresh current retrieval benchmark blocked; no semantic-answer scoring |
+| PDF ingestion | Real parser/seed persisted PDF chunks; protected contract page inspected; bounded page rendering and source-denial regression tests | Local extraction, embedding, persistence and source preview VERIFIED. Fresh browser upload completion not exercised. |
+| Image + OCR ingestion | Real PaddleOCR seed, persisted OCR regions and private original; live mobile image/region inspector | Local extraction, embedding, persistence and preview VERIFIED. Fresh browser upload completion not exercised. |
+| Structured DB records | Seven typed tables, business PKs, current-row origin view; repaired jsonb field-order seed defect; actual invoice fields inspected | Seven persisted rows and stale-row/tenant constraints VERIFIED by local DB and API checks. |
+| Unified vector + metadata index | 19 sources / 45 embedded chunks; invoker hybrid RPC; fresh five-query retrieval evaluation; explicit overdue/terms query returned PDF, row and OCR among top four | Local multimodal index/retrieval VERIFIED. Filtered ANN recall at representative scale unmeasured. |
+| Natural-language answering | ID-only generation, backend canonical excerpts and real SSE; provider returned 503, then raw diagnostic 429 | Implementation/unit contracts VERIFIED; fresh successful live answer BLOCKED. |
+| Retrieval-time row/document ACL | Actual five Auth contexts, invoker RPC and RLS; 43/43 pgTAP and 50 live authorization/source checks | Local role filtering, forged-context denial and forbidden lookups VERIFIED. Hosted unverified. |
+| Unauthorized evidence never enters context | Caller/broker session retrieval; exact bounded context captured by unit tests; actual RLS denies forbidden evidence | Context construction and local retrieval boundary VERIFIED. No independent live outbound prompt capture or successful generation proof this pass. |
+| Exact source citations | Canonical IDs/title/location/excerpts; protected PDF page, OCR region and invoice row resolve correctly; forged citation tests pass | Source lookup/provenance contracts VERIFIED. Every citation from a fresh generated answer remains BLOCKED. |
+| Hallucination/grounding demonstration | Canonical extractive rendering, fabricated quote/ID and bounded invoice-conflict tests | Bounded provenance regressions VERIFIED. Live document injection outcome BLOCKED; general entailment/relevance unverified. |
+| Architecture demonstration | Existing Auth/FastAPI/invoker RLS/pgvector/typed-origin architecture; real Security UI and local stack | Source/schema/local architecture VERIFIED. Populated real-answer trace BLOCKED; hosted unverified. |
 
-The exact six acceptance flows and outage backup are in [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md). Current risks and historical boundaries are in [REVIEW_NEEDED.md](REVIEW_NEEDED.md).
+## Live acceptance flows
+
+| Flow | Current result |
+|---|---|
+| CEO scanned-invoice amount | OCR source/region and retrieval work; live generation BLOCKED. |
+| PDF contract terms | Protected actual contract page and excerpt work; generated answer BLOCKED. |
+| Database invoice status | Persisted `invoices / ACM-INV-2048` and fields work; generated answer BLOCKED. |
+| Cross-modal overdue + terms | Explicit live query retrieves all three modalities, including contract and invoice row; generated answer BLOCKED. |
+| HR same finance question | Real retrieval/direct metadata denies finance; generated refusal BLOCKED. |
+| Forbidden source preview | Citation, document, original and rendered-page requests return 404 in unauthorized contexts; VERIFIED. |
+| Prompt injection | Unit boundary tests pass; successful poisoned-source model outcome BLOCKED. |
+
+## Supporting product checks
+
+Actual local CEO login/logout and all five role controls worked. Role-visible source counts were CEO 19, Finance 13, HR 3, Sales 3 and Engineer 5. All six routes were audited in both themes at desktop/tablet/mobile sizes. Source filters/sort, close buttons, Escape, exposed backdrop closing, focus return/trap, mobile navigation, account theme/closing, empty history and draft reset were checked. Populated conversation persistence/reopen across restart was not verified; the current history contains zero turns.
+
+Latest local security report: `data/local/security-verification.json`, completed `2026-10-09T04:02:54.285391+00:00`, code `f825075`: 50 passed / 2 generation checks blocked, exit 2. Full API suite: 79 passed; local SQL suite: 43 passed; frontend lint/types/build passed. No frontend automated interaction-test script exists; browser checks were manual automation against the real app.
+
+Fresh synthetic retrieval evaluation: hit rate@12 1.000, MRR 0.550, checked forbidden hits 0, 47/47 retrieved locations present, mean 707.6 ms. Five questions and one direct HR check are a small smoke set, not a semantic-answer benchmark. Its narrow OCR-amount `cross_modal_retrieval` flag is false; the separate explicit overdue/terms query retrieved PDF, structured row and OCR. Do not conflate those query definitions.
+
+See [runbook](DEMO_RUNBOOK.md), [current report](FINAL_BUILD_REPORT.md), [visual audit](UI_DESIGN.md) and [remaining review](REVIEW_NEEDED.md).

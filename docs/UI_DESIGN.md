@@ -1,15 +1,31 @@
-# Clearframe UI Direction and Visual Audit
+# Clearframe real UI acceptance audit — 2026-10-09
 
-A quiet enterprise knowledge workspace: neutral light canvas, layered graphite dark surfaces, one restrained green accent, shared type/spacing/border/focus tokens, and six grouped destinations. App shell, source tables, forms, conversations, and inspectors share the same system. No decorative 3D, gradients, new UI framework, or copied product assets were introduced.
+The existing six-route enterprise workspace retains neutral light surfaces, graphite dark surfaces, restrained green accent, shared type/spacing/focus tokens and grouped navigation. Overview, Ask, Sources, Ingest, Security and Evaluation remain the six destinations. This pass repairs real defects while preserving authorization and citation behavior.
 
-Overview favors readable live counts and recent activity. Ask prioritizes the conversation, inline citations, composer, and optional within-page history. Evidence and detailed timings live in temporary drawers. Structured fields use business labels and formatted currency; originals preserve PDF page/OCR region. Sources uses dense searchable/filterable/sortable rows; mobile source actions remain visible. Ingest separates coordinated file and typed-record workflows with validation and truthful atomic indexing status. Security explains the boundary; Evaluation separates recorded synthetic observations from live runs and keeps failure states visible.
+## Actual audit
 
-Native modal drawers provide close button, Escape, outside click, focus trap/return, background inertness, scroll lock, internal scrolling, and full-width mobile layout. Mobile navigation traps/restores focus and makes background content inert. Closed mobile navigation is not keyboard reachable. Account selection/theme, outside click, and Escape close the menu. Reduced motion uses existing global preference handling.
+Inspected the authenticated running app against local Supabase/API at 1440×900, 820×900 and 390×844, all six routes in light and dark modes. These were real rendered pages, not fixture screenshots. CEO-visible counts were 19 sources / 45 chunks / 7 records. Switching actual API contexts showed Finance 13 sources, HR 3, Sales 3, Engineer 5 and CEO 19, preserving the signed-in CEO identity.
 
-## Fresh visual boundary
+Inspected alignment, hierarchy, density, spacing, table actions, field layout, header/account identity, responsive navigation, scroll regions and source inspector composition. No page-level horizontal overflow was observed at the checked sizes. Evaluation deliberately retains an internal table scroller. Ask's mobile example controls are reachable and fill the composer; New clears the draft without a provider call.
 
-Actual public login was inspected. All workspace routes were inspected on a separate explicitly labeled fixture server because live Supabase is unavailable. Desktop light/dark, mobile light/dark, and tablet layout checks found no page-level horizontal overflow; Evaluation tables retain a bounded horizontal scroller. All five role controls were exercised as UI controls, not live Auth/RLS verification. Conversation replay/new, source filters, record/PDF/image previews, OCR highlight, trace, drawers, and mobile navigation were inspected. Recorded Evaluation table data came from a historical local report and stayed labeled recorded.
+Checked source search/type filters, alphabetical sorting and empty results. Actual contract preview shows its canonical page and Net 30 excerpt; invoice fields show persisted `invoices / ACM-INV-2048`, US$48,000, unpaid and dated snapshot; OCR original/selected region fit the mobile drawer. Drawer X, Escape, outside click, focus trapping/return; mobile navigation X, Escape, exposed backdrop closing and focus return; account outside/Escape/theme controls; logout/CEO login; empty history and draft reset were exercised. Invalid JSON shows a clear validation message before indexing.
 
-Fixed findings: drawer focus failed to return; Tab could escape the only drawer control; record title/location duplicated; amount fields showed raw minor units; late requests could reopen or contaminate a closed inspector; mobile source action was offscreen; refresh errors disappeared behind previous data; ingestion repeated its error message. Source sorting and partial-validation copy were added during the final bounded repair pass.
+## Concrete repairs
 
-[Desktop Ask fixture](design/final-desktop-ask-fixture.jpg) and [mobile evidence fixture](design/final-mobile-evidence-fixture.jpg) are layout evidence only. Browser tests did not validate live role switching, provider answers, persistent history, upload completion, or database policy execution.
+- Loaded Sources/Security/Evaluation with current workspace context, eliminating rows with a stuck Loading account; guarded late prior-role errors and cleared stale errors on current success.
+- Replaced a blank native PDF embed with a protected bounded PNG of the exact PDF page using existing PyMuPDF; original bytes and RLS remain intact.
+- Kept tablet source actions inline by moving the compact layout breakpoint to 1000px; toolbar search wraps and actions stay visible.
+- Improved mobile target sizes and gave Overview identity its own row.
+- Initial Evaluation loading no longer falsely says no evaluation exists; invalid structured JSON gives quoted-key/comma guidance.
+
+## Evidence and limits
+
+[Live desktop overview](design/live-desktop-overview-light.png), [live protected PDF page](design/live-desktop-pdf-dark.png), [live mobile OCR original](design/live-mobile-ocr-dark.png). These images show real sources; they do not demonstrate successful generated answers. Older `final-*-fixture.jpg` images describe an earlier isolated layout pass.
+
+No unresolved placement/overflow defect was observed after the bounded repair pass at these sizes. This is not a claim that every possible viewport/state is flawless. Gemini quota prevented populated live answer, inline generated citation, retrieval trace and stored-history replay audit. Browser successful upload completion, automated WCAG/contrast certification and reduced-motion emulation were not checked. A transient API connection error was recoverable with Retry; its cause was not established.
+
+## Skills and references
+
+Used installed [Impeccable](https://github.com/pbakaus/impeccable) audit/craft instructions. Its context-engine command was unavailable, so context loading did not run; existing project context was read directly. Installed Taste instructions were read; the skill excludes dense enterprise app UI, so its applicable visual-consistency guidance was used without imposing a landing-page redesign. No unavailable Superdesign tool is claimed.
+
+Browser research inspected the [Awwwards Tipalti nominee](https://www.awwwards.com/sites/tipalti) and [Carbon enterprise table guidance](https://www.carbondesignsystem.com/building-blocks/core/components/data-table/guidelines). Tipalti was a nominee; this pass did not verify a winning-site status. References informed spacing, quiet hierarchy and visible row actions; no branding, assets or exact layouts were copied.

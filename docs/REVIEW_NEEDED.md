@@ -1,33 +1,25 @@
-# Review Needed — 2026-10-09
+# Review Needed — current acceptance boundary, 2026-10-09
 
-This is the current verification boundary; earlier reports are historical.
+## Verified now
 
-## VERIFIED LOCALLY
+79 backend tests; Ruff; frontend lint/types/production build; all three local migrations; 43/43 pgTAP; 50 live authorization/source checks; local launcher restart and actual CEO Auth. Real persisted corpus: 19 sources, 45 embedded chunks, 7 typed rows, five Auth contexts. PDF/OCR/record previews and six real routes in both themes at desktop/tablet/mobile work. Fresh retrieval smoke set and explicit three-modality overdue/terms retrieval were executed. See [matrix](SUBMISSION_MATRIX.md) for precise scope.
 
-- 76 backend tests; Ruff check and format; frontend ESLint, TypeScript, production build.
-- Actual local PDF/OCR extraction across 19 synthetic sources: 45 candidates (8 PDF, 30 OCR, 7 structured fixture candidates). Database embedding/persistence is not implied.
-- Public login renders in the real app, including the production server. A separate labeled visual fixture server validates six workspace routes, both themes, 1440×900 / 900×900 / 390×844 layouts, all five role controls, history replay/new conversation, filters, PDF/image/record previews, OCR overlay, native drawers, and mobile navigation. Fixture checks prove no live authorization or generation behavior.
-- Configured 3.8 Flash and 3.7 Flash IDs appeared in a real Gemini inventory response (HTTP 200). One synthetic, bounded generation attempt returned HTTP 503 after the single fallback.
+## Must fix before submission
 
-## BLOCKED
+Gemini generation is unavailable. Full verification reached 503 after fallback; a bounded direct raw diagnostic subsequently returned 429 RESOURCE_EXHAUSTED for the 20-request free-tier generation limit, with a reported 22h 48m 46s retry interval. Embeddings work. Do not loop failing calls, fabricate answers or change billing/credentials to bypass this boundary.
 
-- Docker engine socket is absent/unavailable. Local Supabase API is unreachable; Postgres 127.0.0.1:54322 refuses connections. New migration application, 43 pgTAP assertions, real typed-row persistence, history persistence, and five-role database flows cannot be verified.
-- Live grounded Gemini answer, cross-modal answer, HR refusal, and live injection outcome are incomplete. Do not spend repeated failing provider calls or substitute a fixture answer.
-- `scripts/dev` and readiness checks stop with a clear blocked result; a clean full-stack restart is not verified.
+When generation is available, run `./scripts/verify_demo` and all seven [runbook acceptance flows](DEMO_RUNBOOK.md). Verify exact citations from each successful answer, inspect live authorized evidence/trace, exercise the poisoned source only when it is actually retrieved, and save/reopen a real conversation across restart. Current empty history is not persistence/replay proof. Browser upload success has not been exercised in this pass.
 
-## RECORDED BUT NOT FRESH
+## Other important boundaries
 
-`PHASE1_VERIFICATION.md`, `FINAL_LUNA6_FUNCTIONALITY_REPORT.md`, and ignored historical evaluation files describe older code/runtime state. Prior pgTAP 24/24 and an earlier successful OCR answer do not verify this migration or today's provider. Saved metrics remain labeled recorded.
+- Docker's socket disappeared once during the final restart; supported CLI recovery and repeat local checks succeeded, but the shutdown cause is unknown. Recheck readiness before recording.
+- Hosted Supabase was untouched and unverified. Only local additive migrations and tests ran; no reset.
+- Exact context construction and local RLS are tested; no independent capture of a successful live outbound generation prompt occurred.
+- Extractive provenance does not establish relevance, source truth, general entailment or exhaustive injection resistance. The invoice conflict guard is bounded.
+- Synthetic retrieval metrics are a small smoke set. The narrow OCR query's cross-modal flag is false; a separately tested overdue/terms query retrieves all three modalities. Neither proves a successful cross-modal answer.
+- Typed rows inherit document grants; each demo structured source holds one row. Chunk-only grants do not expose the origin row.
+- Ingestion uses compensating multi-request writes, local private originals and bounded parsers. Production isolation, concurrency/retry lifecycle, hosted original storage and automated reindex remain unverified.
+- History is bounded to 200 recent turns and does not implicitly reuse prior conversation evidence. Filtered HNSW recall/query plans at representative scale remain unmeasured.
+- Visual audit found no remaining page-level overflow at checked sizes. Internal Evaluation table scrolling is retained. Populated chat/history/trace states, full automated accessibility/contrast and reduced-motion emulation were not audited live in this pass.
 
-## UNVERIFIED / residual risks
-
-- Hosted Supabase was neither modified nor verified.
-- Extractive provenance is enforced; relevance, source truth, general entailment, and exhaustive contradiction/injection resistance are not solved. The payment guard is deliberately bounded to record/explicit invoice identifiers.
-- Typed rows currently inherit a source-document grant; chunk-only structured grants do not expose their origin row. Each demo structured source holds one row.
-- Ingestion uses bounded local parsers and compensating multi-request writes, not a transaction/job queue. Production isolation, rate limits, concurrent retry/lifecycle behavior, hosted original storage, and automated reindex need further review.
-- History loads at most 200 recent turns; follow-up questions do not implicitly reuse previous conversational evidence. No rename/search platform was added.
-- Filtered HNSW recall, real query plans, representative latency/scale, and performance under selective grants remain unmeasured.
-
-## Next evidence
-
-Start the existing Docker runtime, run `./scripts/dev --seed`, then `./scripts/verify_demo`. Resolve any migration/seed errors before recording. Run the real retrieval evaluation, inspect current evidence for the six acceptance flows, and stop after one bounded failed provider attempt. Hosted verification is a separate authorized task.
+Older `PHASE1_VERIFICATION.md`, `FINAL_LUNA6_FUNCTIONALITY_REPORT.md`, prior fixture screenshots and earlier provider answers remain historical, not current acceptance evidence.

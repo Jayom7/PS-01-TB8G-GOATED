@@ -27,9 +27,4 @@ API, API to database, normal query to privileged ingestion, and API to model.
 
 ## Residual risks
 
-Controls are partial. Local tests cover prompt-context bounds and citation
-membership, but not model obedience, semantic entailment, database RLS, or
-live retrieval. RLS semantics for vector queries, policy
-inheritance/revocation behavior, HNSW recall under selective ACL predicates,
-and exact authorized-context capture remain review gates in
-`REVIEW_NEEDED.md`.
+Local deterministic adversarial/context tests, 55 SQL assertions and 51 live authorization/refusal checks pass. Real primary/fallback business answers and one explicitly untrusted literal poison inspection passed. A Finance integration independently captured outbound IDs and compared them with actual RLS visibility; both attempts matched. Its primary deadline was deliberately interrupted, while all external dependencies and fallback were real. This is bounded integration evidence, not exhaustive injection resistance, source truth or global leak certification. General entailment, representative-scale recall, hosted deployment and production parser/storage isolation remain unverified. No atomic revocation guarantee spans external generation. See MASTER_ACCEPTANCE_CHECKLIST.md for exact successes and intermittent provider failures.

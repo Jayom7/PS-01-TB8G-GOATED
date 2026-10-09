@@ -1,25 +1,17 @@
-# Review Needed — current acceptance boundary, 2026-10-09
+# Remaining acceptance and review
 
-## Verified now
+## MUST FIX BEFORE SUBMISSION
 
-79 backend tests; Ruff; frontend lint/types/production build; all three local migrations; 43/43 pgTAP; 50 live authorization/source checks; local launcher restart and actual CEO Auth. Real persisted corpus: 19 sources, 45 embedded chunks, 7 typed rows, five Auth contexts. PDF/OCR/record previews and six real routes in both themes at desktop/tablet/mobile work. Fresh retrieval smoke set and explicit three-modality overdue/terms retrieval were executed. See [matrix](SUBMISSION_MATRIX.md) for precise scope.
+The single highest-priority blocker is dependable Gemini availability for recording: real primary and normal fallback answers now succeed, but some normal combined requests and the latest full verifier still returned upstream 503/timeouts. Fresh OCR-specific generation remains incomplete. No code can guarantee upstream availability. Wait for the existing configured account/models to be available, run `./scripts/verify_demo` once, and record the normal browser combined question. Respect returned quota/retry guidance; no new key/provider/billing changes are authorized by this pass.
 
-## Must fix before submission
+## HIGH-VALUE WINNING FEATURES
 
-Gemini generation is unavailable. Full verification reached 503 after fallback; a bounded direct raw diagnostic subsequently returned 429 RESOURCE_EXHAUSTED for the 20-request free-tier generation limit, with a reported 22h 48m 46s retry interval. Embeddings work. Do not loop failing calls, fabricate answers or change billing/credentials to bypass this boundary.
+Implemented and verified: generated persistent threads, three-modal real fallback integration, inline exact evidence, sequential SSE/retry, fresh browser ingestion, transactional deletion with generated-history invalidation, durable events, actual dashboard activity and post-repair evaluation. Exact-ID ranking/relevance defects were repaired. Google completion needs private operator configuration. Actual password entry/change requires user handoff under browser policy.
 
-When generation is available, run `./scripts/verify_demo` and all seven [runbook acceptance flows](DEMO_RUNBOOK.md). Verify exact citations from each successful answer, inspect live authorized evidence/trace, exercise the poisoned source only when it is actually retrieved, and save/reopen a real conversation across restart. Current empty history is not persistence/replay proof. Browser upload success has not been exercised in this pass.
+## STRONGER-MODEL SECURITY/ARCHITECTURE WORK
 
-## Other important boundaries
+General entailment/exhaustive injection resistance and atomic revocation across an external call are not guarantees. Bounded canonical guards, actual poison inspection, 55 SQL assertions, 51 live checks and one independent Finance outbound-ID capture pass. Hosted RLS/Auth, production parser/storage isolation and representative-scale recall remain unverified. Ordinary audit writes are best effort; deletion audit is transactional.
 
-- Docker's socket disappeared once during the final restart; supported CLI recovery and repeat local checks succeeded, but the shutdown cause is unknown. Recheck readiness before recording.
-- Hosted Supabase was untouched and unverified. Only local additive migrations and tests ran; no reset.
-- Exact context construction and local RLS are tested; no independent capture of a successful live outbound generation prompt occurred.
-- Extractive provenance does not establish relevance, source truth, general entailment or exhaustive injection resistance. The invoice conflict guard is bounded.
-- Synthetic retrieval metrics are a small smoke set. The narrow OCR query's cross-modal flag is false; a separately tested overdue/terms query retrieves all three modalities. Neither proves a successful cross-modal answer.
-- Typed rows inherit document grants; each demo structured source holds one row. Chunk-only grants do not expose the origin row.
-- Ingestion uses compensating multi-request writes, local private originals and bounded parsers. Production isolation, concurrency/retry lifecycle, hosted original storage and automated reindex remain unverified.
-- History is bounded to 200 recent turns and does not implicitly reuse prior conversation evidence. Filtered HNSW recall/query plans at representative scale remain unmeasured.
-- Visual audit found no remaining page-level overflow at checked sizes. Internal Evaluation table scrolling is retained. Populated chat/history/trace states, full automated accessibility/contrast and reduced-motion emulation were not audited live in this pass.
+## PRESENTATION/DEMO WORK
 
-Older `PHASE1_VERIFICATION.md`, `FINAL_LUNA6_FUNCTIONALITY_REPORT.md`, prior fixture screenshots and earlier provider answers remain historical, not current acceptance evidence.
+Use the runbook and master checklist. The real three-modal integration deliberately interrupted the primary deadline; the fallback, Auth/RLS, embeddings, history and previews were real. Its generated thread also reopened in the Finance browser. Do not describe that fault-injection scope as a naturally occurring primary outage. Normal daemon fallback success is separately recorded. Fresh sources were removed after actual generated replay checks; the original 19/45/7 corpus remains. Password update/timed recovery expiry, deliberate wall-clock browser expiry and automated accessibility/reduced-motion checks remain NOT RUN.

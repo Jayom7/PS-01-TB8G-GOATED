@@ -1,3 +1,5 @@
+> Historical snapshot. Current implementation, test counts and blockers are recorded in [MASTER_ACCEPTANCE_CHECKLIST.md](MASTER_ACCEPTANCE_CHECKLIST.md) and [FINAL_BUILD_REPORT.md](FINAL_BUILD_REPORT.md).
+
 > Historical record. Current implementation and verification: [FINAL_BUILD_REPORT.md](FINAL_BUILD_REPORT.md) and [REVIEW_NEEDED.md](REVIEW_NEEDED.md). The current manifest again contains 19 sources; older six-source notes do not describe this pass.
 
 # Phase 1 verification — 2026-10-08

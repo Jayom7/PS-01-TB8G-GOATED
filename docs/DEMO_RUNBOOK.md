@@ -1,59 +1,52 @@
-# Demo Runbook
+# Demo runbook — current implementation
 
-Current status (2026-10-09): local stack and source/security checks pass. Gemini generation is blocked by observed 503 then raw 429 quota exhaustion. No generated flow below has fresh successful acceptance in this pass. Do not repeatedly call the provider before its reported retry interval has elapsed.
-
-## 1. Start and preflight
-
-Start the existing Docker engine. From the repository root:
+Real primary and fallback answers are now verified. Provider availability remains intermittent; the latest full verifier returned upstream 503. Do not substitute fixture answers or repeatedly cycle unavailable models. Exact runtime scope is in MASTER_ACCEPTANCE_CHECKLIST.md.
+## Start and verify
 
 ```sh
-./scripts/dev --seed
-```
-
-After the seed exists, use `./scripts/dev` for later launches. In another terminal:
-
-```sh
+./scripts/dev
+./scripts/verify_demo --skip-generation
+# One bounded real provider verification:
 ./scripts/verify_demo
 ```
 
-This applies no hosted changes or reset. Seed failures are failures; rerun only after diagnosing them. If Docker is unavailable, the launcher exits 2 before starting an incomplete app. If Gemini returns 429/503, do not loop.
+Start the existing Docker runtime first. ./scripts/dev reuses local data, applies additive migrations, configures the ignored local browser/API environment and starts API/web. Use --seed only for first-time synthetic setup, not to repair an unexplained failure. No reset/hosted operation. Local private credentials remain in ignored .local-demo-credentials.json. Open http://localhost:3000/login; sign in as local CEO. The real browser actor stays CEO when its demo access context changes.
 
-## 2. CEO login and Overview
+--skip-generation intentionally exits2 (51 pass,1skipped generation). This is incomplete acceptance, not a failed authorization suite. Full verification stops bounded generation and reports actual provider causes. Read saved ignored reports under data/local/.
 
-Open `http://localhost:3000/login`. Use the CEO entry in ignored `.local-demo-credentials.json` offscreen. Keep the signed-in CEO visible; counts must come from the running database. Fixture extraction counts are not live workspace counts.
+## Required recording sequence
 
-## 3. OCR amount — flow A
+1. Ask the amount on Acme's scanned invoice. Real browser 3.8 Flash returned USD 48,000.00; open exact OCR region/original.
+2. Ask Acme contract payment terms and open PDF page 1. Generated concise30-day answer verified.
+3. Select Finance context; ask invoice payment status. Real 3.8 answer and invoices/ACM-INV-2048 preview verified.
+4. Ask “What is the scanned Acme invoice total, what payment terms does the PDF contract state, and is the database invoice unpaid? Cite all three source types.” A real API integration returned all 3 through 3.7 fallback with exact previews; primary deadline deliberately interrupted. Normal daemon combined attempts also failed503/timeouts. Show that scope honestly.
+5. Select HR and ask the identical scanned amount question: no authorized relevant evidence,0 context/no model.
+6. Forbidden citation/document/original/page lookups return404; live suite passes.
+7. Actual literal poisoned document inspection quotes untrusted text without executing it; run adversarial regressions for forgeries/conflicts.
+8. Show authenticatedCEO vs activeHR/Finance context; non-CEO forgedCEO denied.
+9. Generated OCR/contract conversation→refresh→History reopen→actual API restart→reopen verified. Finance-owned generated cross-modal history also reopens under the real Finance actor. Replay performs current RLS reconstruction; it does not rerun Gemini.
+10. Follow the fresh workflow below. Browser ingestion/actual retrieval passes; normal 3.7 fallback answered fresh PDF/database facts. A separate fully validated fresh OCR answer remains blocked.
+11. Cancel named deletion, then delete only disposable sources. Resume30 checks verify actual generated replay invalidation, cleanup/audit/typed/RPC absence.
+12. Six routes×2 themes×4 sizes passed48 combinations; populated Ask passed8 extra states. Inspect modal/navigation close/Escape/focus.
 
-In CEO or Finance Manager context ask: **What amount is shown on Acme's scanned invoice?** A successful answer should cite the OCR source. Open its inline citation; inspect the original image and highlighted OCR region. Do not accept an answer without the real source lookup.
+## Reproduce fresh-source checks
 
-## 4. PDF, database and cross-modal answers — flow B
+```sh
+.venv/bin/python apps/api/scripts/verify_product.py --prepare-assets
+```
 
-For the direct PDF flow ask: **What payment terms are in Acme's contract?** Require the real `ACM-MSA-2026-07` contract page and canonical excerpt.
+Through Ingest's real browser file chooser upload data/local/acceptance-assets/fresh-acceptance.pdf and .png, granting Finance (CEO retained). Insert one invoices row with source name “Disposable invoice CF-INV-1009”; use the existing Acme customer identity from Sources. Set invoice_id CF-INV-1009,total_minor_units123400,currencyUSD,payment_statusunpaid and valid invoice/due/status_as_of dates; the form enforces its complete schema. Then:
 
-Ask: **Is Acme's invoice overdue and what payment terms does its contract specify?** Inspect both `invoices / ACM-INV-2048` and the contract PDF page. The row is unpaid, due 2026-10-01, with status snapshot 2026-10-08; contract terms are Net 30. These are expected synthetic facts, not a prefilled answer or a promise that the model will select both sources.
+```sh
+.venv/bin/python apps/api/scripts/verify_product.py
+# Delete only these three disposable sources through Sources, then:
+.venv/bin/python apps/api/scripts/verify_product.py --verify-deletion
+```
 
-For a direct database check ask: **Is invoice ACM-INV-2048 paid?** The inspector must show actual persisted table fields.
+The first command checks real persisted vectors/RPC/previews/HR denials/typed amount/history/audit. The deletion command uses saved disposable IDs to check documents/chunks/grants/RPC/previews/original cleanup and invoice removal. Do not reuse/delete immutable seeded demo sources. The final verified state retains19 sources/45 chunks/7typed rows.
 
-## 5. HR contrast and forbidden preview — flows C/D
+## Auth and outage handling
 
-Close the inspector; select HR Manager in the account menu, preserving CEO browser identity. Repeat the finance question. Require insufficient authorized evidence with no finance title/excerpt. In a controlled local test, requesting the previously visible finance citation/original under HR context must return the same 404 as a missing source. Use the real verification suite; editing UI labels alone is not proof.
+Google is disabled with an explicit configuration message. Exact operator setup is in SECURITY_ARCHITECTURE.md. Forgot password delivered a local Mailpit email (http://127.0.0.1:54324), exchanged its PKCE code in the same browser and displayed the reset form. New password entry/change is a user handoff; no account password was altered.
 
-## 6. Security, trace and saved history — flow F
-
-Return to CEO context. Show Security's retrieval boundary and explicit unmeasured/live-policy limitations. Open Retrieval Trace from a real answer: question, identity, authorization, evidence count, actual model, citation resolution, and measured stage durations. Ranking-only time is not separately measured. Save a real completed conversation, reopen it from History, restart with `./scripts/dev`, and reopen again; require current access checks and canonical citations. Empty history and unit tests do not prove this persistence flow.
-
-## 7. Injection — flow E
-
-Only if checked successfully in preflight, ask about the security policy while the poisoned `prompt-injection-test-01.pdf` is retrieved. Inspect the evidence and confirm its instructions did not override policy or introduce restricted content. A prompt string and unit test alone do not establish live model obedience.
-
-## 8. Evaluation and ingestion
-
-Run Evaluation only against the real current local stack. Explain hit rate@12, MRR, checked forbidden hits, and citation-location presence. Refresh labels saved measurements as recorded. CEO ingestion supports file/drop or a typed relational row; select a grant and show the real completion/error state. No per-stage ingestion job feed is available.
-
-## 9. Acceptance checklist and provider-outage backup
-
-The generated acceptance checklist is CEO OCR invoice, PDF contract, database invoice, cross-modal overdue/terms, HR same finance question and poisoned-source resistance; forbidden source preview is the seventh independent access flow. `verify_demo` automates OCR/HR generation plus security/source checks; it does not replace the other manual generated flows. For every displayed citation compare title, source, exact location and excerpt with the protected inspector. Inspect the evidence entering the actual generation flow, and never claim a trace alone independently captured the outbound provider prompt.
-
-### Outage backup
-
-Present the actual unavailable state. With a working database, use `./scripts/verify_demo --skip-generation` to demonstrate Auth, stored-vector authorized retrieval, forbidden-source denial, and pgTAP; exit 2 correctly means generation is incomplete. Show protected Sources/record/PDF/OCR previews directly and describe the architecture. Identify historical results as historical. If Docker is also down, show code/tests and clearly state that live acceptance is blocked. Never substitute the disposable visual fixture server for a live demo.
+For provider 503, retain the visible question, inspect authorized sources, and show the real failure/retry state. Never call a failed request a valid answer. For429respect the returned retry interval; only explicit model-specific quotas may switch once. For API/network errors use Retry after confirming local service readiness. See MASTER_ACCEPTANCE_CHECKLIST for all remaining acceptance gaps.

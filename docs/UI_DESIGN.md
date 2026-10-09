@@ -1,31 +1,17 @@
-# Clearframe real UI acceptance audit — 2026-10-09
+# Clearframe final UI verification — 2026-10-09
 
-The existing six-route enterprise workspace retains neutral light surfaces, graphite dark surfaces, restrained green accent, shared type/spacing/focus tokens and grouped navigation. Overview, Ask, Sources, Ingest, Security and Evaluation remain the six destinations. This pass repairs real defects while preserving authorization and citation behavior.
+Preserved the six-route product and restrained neutral/graphite palette, shared typography/spacing/focus tokens and green accent. Clearframe remains the product; NovaCore is the synthetic tenant. Installed Impeccable craft/polish guidance informed the actual UI repair. Reference research examined [Linear's current product page](https://linear.app/features) and [Awwwards typography/interaction examples](https://www.awwwards.com/inspiration/about-us-contemporary-type); no branding or assets were copied.
 
-## Actual audit
+## Actual final coverage
 
-Inspected the authenticated running app against local Supabase/API at 1440×900, 820×900 and 390×844, all six routes in light and dark modes. These were real rendered pages, not fixture screenshots. CEO-visible counts were 19 sources / 45 chunks / 7 records. Switching actual API contexts showed Finance 13 sources, HR 3, Sales 3, Engineer 5 and CEO 19, preserving the signed-in CEO identity.
+All six authenticated routes in both themes at 1440×900,1024×768,390×844 and1280×500:48 combinations repeated on the final UI, zero page-level overflow or page alerts. The actual coverage JSON remains ignored under data/local/ui-verification/coverage.json. Internal long tables/drawers scroll intentionally. Fresh PDF/OCR/typed previews, named deletion/cancel/success, source filters/sorting/empty states and evaluation run/recorded labels were exercised.
 
-Inspected alignment, hierarchy, density, spacing, table actions, field layout, header/account identity, responsive navigation, scroll regions and source inspector composition. No page-level horizontal overflow was observed at the checked sizes. Evaluation deliberately retains an internal table scroller. Ask's mobile example controls are reachable and fill the composer; New clears the draft without a provider call.
+Real browser Ask now returns the scanned USD 48,000 answer and concise 30-day contract terms with inline citations. The generated thread reopened after reload/API restart. Populated Ask additionally passed both themes at all four sizes (8 checks, no overflow). A real three-modal fallback answer persisted under the Finance actor and reopened in the browser with OCR, PDF and invoice-row citations; the exact database fields were inspected. Its primary failure was deliberately induced in a real integration, explicitly recorded in the report. Failed live requests still preserve the visible question, retry and authorized source links. Shift+Enter inserts a newline; Enter submits; the in-flight ref blocks duplicates.
 
-Checked source search/type filters, alphabetical sorting and empty results. Actual contract preview shows its canonical page and Net 30 excerpt; invoice fields show persisted `invoices / ACM-INV-2048`, US$48,000, unpaid and dated snapshot; OCR original/selected region fit the mobile drawer. Drawer X, Escape, outside click, focus trapping/return; mobile navigation X, Escape, exposed backdrop closing and focus return; account outside/Escape/theme controls; logout/CEO login; empty history and draft reset were exercised. Invalid JSON shows a clear validation message before indexing.
+Short-height navigation scrolls with profile anchored. Mobile navigation opens left, closes by visible control/Escape and returns focus. Source dialog interior click stays open, visible close/Escape/outside click dismiss it and focus returns. Short-height drawer scrolls within its500px viewport. Source Delete is available on mobile as well as desktop. Identity and active demo context remain distinct in the bottom profile.
 
-## Concrete repairs
+Local cross-origin requests intermittently failed despite healthy services; replacing local browser API traffic with a native same-origin Next rewrite resolved the repeat48-state pass. The underlying browser/network cause was not conclusively isolated. API JWT/RLS enforcement remains intact. Real outages still expose retry/error states.
 
-- Loaded Sources/Security/Evaluation with current workspace context, eliminating rows with a stuck Loading account; guarded late prior-role errors and cleared stale errors on current success.
-- Replaced a blank native PDF embed with a protected bounded PNG of the exact PDF page using existing PyMuPDF; original bytes and RLS remain intact.
-- Kept tablet source actions inline by moving the compact layout breakpoint to 1000px; toolbar search wraps and actions stay visible.
-- Improved mobile target sizes and gave Overview identity its own row.
-- Initial Evaluation loading no longer falsely says no evaluation exists; invalid structured JSON gives quoted-key/comma guidance.
+[Actual successful Ask](design/current-ask-success.png), [real generated cross-modal history](design/current-cross-modal-history.png), and [actual failed Ask with useful sources](design/current-ask-provider-failure.png) preserve the distinct verified states. Additional local evidence includes PDF short-height, mobile history, recovery-ready and evaluation screenshots in ignored data/local/ui-verification/.
 
-## Evidence and limits
-
-[Live desktop overview](design/live-desktop-overview-light.png), [live protected PDF page](design/live-desktop-pdf-dark.png), [live mobile OCR original](design/live-mobile-ocr-dark.png). These images show real sources; they do not demonstrate successful generated answers. Older `final-*-fixture.jpg` images describe an earlier isolated layout pass.
-
-No unresolved placement/overflow defect was observed after the bounded repair pass at these sizes. This is not a claim that every possible viewport/state is flawless. Gemini quota prevented populated live answer, inline generated citation, retrieval trace and stored-history replay audit. Browser successful upload completion, automated WCAG/contrast certification and reduced-motion emulation were not checked. A transient API connection error was recoverable with Retry; its cause was not established.
-
-## Skills and references
-
-Used installed [Impeccable](https://github.com/pbakaus/impeccable) audit/craft instructions. Its context-engine command was unavailable, so context loading did not run; existing project context was read directly. Installed Taste instructions were read; the skill excludes dense enterprise app UI, so its applicable visual-consistency guidance was used without imposing a landing-page redesign. No unavailable Superdesign tool is claimed.
-
-Browser research inspected the [Awwwards Tipalti nominee](https://www.awwwards.com/sites/tipalti) and [Carbon enterprise table guidance](https://www.carbondesignsystem.com/building-blocks/core/components/data-table/guidelines). Tipalti was a nominee; this pass did not verify a winning-site status. References informed spacing, quiet hierarchy and visible row actions; no branding, assets or exact layouts were copied.
+No unresolved placement/overflow defect observed in checked states. Automated WCAG/contrast certification, reduced-motion emulation and deliberately expired browser-session timing were not run. CSS respects reduced motion; these limits do not imply certification. Google is explicitly unconfigured; real local recovery email/callback/form was checked without entering or changing a password.

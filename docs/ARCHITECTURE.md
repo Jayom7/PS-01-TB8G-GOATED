@@ -1,27 +1,27 @@
-# Architecture
+# Architecture — current local acceptance
 
-Current code: Next.js 16, FastAPI, Supabase Auth/Postgres, pgvector (1536 dimensions), and Gemini REST adapters. The existing invoker retrieval architecture is preserved. Database deployment is blocked in this pass; migration contents are implemented, not freshly applied.
+Next.js 16.4 / React 19, FastAPI, Supabase Auth/Postgres, pgvector 1536 and Gemini REST adapters. Five additive migrations are applied locally; hosted deployment is unverified and untouched.
 
 ```mermaid
 flowchart TD
-  PDF[PDF pages] --> Index[Unified vector + metadata index]
-  OCR[Images / OCR regions] --> Index
-  Seed[JSON seed input] --> DB[Typed PostgreSQL business rows]
-  DB --> Index
-  Auth[Verified Auth / brokered demo role] --> ACL[Retrieval-time database RLS]
-  Index --> ACL
-  ACL --> Evidence[Bounded canonical authorized passages]
-  Evidence --> Gemini[Gemini selects evidence IDs]
-  Gemini --> Validator[Backend resolves IDs / contradiction guard]
-  Validator --> UI[Canonical excerpts and citations]
+  Files[PDF pages / real OCR regions] --> Index[Unified vectors + provenance]
+  Records[Seven typed PostgreSQL tables] --> Index
+  Actor[Verified real actor] --> Broker[Local actor/org/role-bound demo broker]
+  Broker --> RLS[Invoker RPC + database RLS]
+  Index --> RLS
+  RLS --> Check[Current evidence reauthorization]
+  Check --> Gemini[System policy + untrusted question/evidence]
+  Gemini --> Validate[Canonical IDs / relevance / invoice conflicts]
+  Validate --> UI[Business summary + exact source citations]
+  Validate --> History[Actor/org/context history]
 ```
 
-Normal retrieval and source inspection use user sessions, never the service key. CEO role brokering is local-only and preserves the browser actor. Local privileged ingestion is separate and grants the selected role plus CEO.
+The local browser forwards /api/v1 through a native Next rewrite configured by server-only API_INTERNAL_URL. It forwards the same bearer/context headers. FastAPI validates them; the web session proxy skips duplicate cookie refresh for these API paths. SSR protected pages still validate claims. Public login/callback/recovery routes remain available during Auth errors.
 
-Structured fixtures are seed inputs. The seed inserts actual typed rows, rereads PostgreSQL, derives canonical summaries, and embeds them. A restrictive chunk policy compares indexed fields against the current RLS-visible row; edits/deletion fail closed pending reindex. Composite document/org foreign keys prevent cross-tenant parent relationships.
+PDF/OCR source files are private local originals. Typed records are inserted and reread before indexing. The invoker structured-record policy compares current fields with indexed fields; changed/deleted records fail closed pending explicit reindex. No automatic reindex worker is implemented.
 
-FastAPI reuses a lifespan HTTP client, embeds once, retrieves once, caps canonical content at 16,000 characters, and permits one configured fallback on transient provider failures. No cross-user answer/evidence cache is introduced. Operational SSE events are server generated; only validated final excerpts are released. Auth, embedding, combined retrieval/ranking, generation, validation, history save, and total durations are measured where executed; separate ranking time is unmeasured.
+The API shares a lifespan HTTP client, embeds/retrieves once, bounds context to 16,000 content characters and permits at most two distinct verified configured generation models. Each submission rechecks current actor/context and RLS-visible rows. This narrows the revocation race but cannot make an external provider call atomic with the database.
 
-History is persisted under the actor, organization, and active context. Reopen queries current grants and rebuilds citations/claim text. There is no implicit conversational-memory prompt: each question retrieves its own evidence.
+History uses the existing query_history table and reconstructs responses from current citation rows and independently RLS-visible siblings. Exact invoice retrieval is scoped inside the invoker RPC, and zero-keyword matches receive no keyword-rank bonus. Small talk is explicitly labeled and rebuilt from its question. No implicit conversational-memory prompt is introduced. Metadata-only security events survive restarts. Delete uses one database transaction for evidence, grants, typed origin rows, audit and cleanup intent; private file cleanup follows and pending jobs drain on API startup.
 
-Original uploads remain private local files. Opening an original requires a current document grant; a chunk-only grant never exposes sibling content. Browser bytes already viewed cannot be retroactively revoked. See [review status](REVIEW_NEEDED.md) for remaining proof and production boundaries.
+See [acceptance](MASTER_ACCEPTANCE_CHECKLIST.md), [RAG](RAG_PIPELINE.md), [security](SECURITY_ARCHITECTURE.md), and [data model](DATA_MODEL.md).

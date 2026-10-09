@@ -1,21 +1,26 @@
-# Security Architecture
+# Security architecture
 
-## Boundaries
+- Supabase verifies bearer identity. Accounts without an assigned profile/role are denied; login never provisions privileges. Local global signup is disabled, while the email provider remains enabled.
+- Retrieval, previews and history evidence reads forward user/scoped demo JWTs to SECURITY INVOKER RPC/RLS. No broad service-key read enters a generation context.
+- Only the explicitly provisioned local CEO may broker one of five seeded contexts. Cache keys include actor, organization and role. Every reuse verifies current target org/role/email. Local storage and X-Demo-Role are requests, never authorization.
+- Every generation attempt rechecks current actor/context and exact current evidence. External generation is not an atomic database transaction; concurrent changes after submission cannot retract bytes.
+- Model output is untrusted: IDs only, server-owned text/provenance, bounded relevance, poison and invoice-conflict guards. Trusted policy is in systemInstruction. General semantic entailment and live model injection resilience remain unverified.
+- Original files are contained, private, no-store and require document RLS; chunk-only grants cannot expose sibling original bytes. Forbidden and missing source lookups both return 404 without names/excerpts.
+- History is scoped to actor/org/context. Replay ignores stored client-written answer text/trace, rechecks source rows and reconstructs citations. Another user's guessed conversation ID returns 404.
+- Local CEO ingestion has a separate privileged writer, validation and compensating cleanup. These writes are not a single transaction. Delete uses a service-only transactional RPC that independently validates CEO/org membership and cascades source children; FK conflicts roll back safely.
+- Durable cleanup intent survives restarts. Only private ingested originals are removed; immutable seed files are retained. Their deleted source cannot be retrieved or opened.
+- security_events stores necessary actor/org/context/kind/outcome/count/time metadata only. Authenticated clients cannot insert or alter events. RLS allows self/org reads; API scopes active context. Verified denied role requests are attributed to the actor's real role, never a forged role. Unverifiable identities are not attributed to tenants.
 
-- Supabase Auth verifies identity; API schemas reject caller-supplied role, organization, ACL, and evidence fields.
-- Ordinary retrieval/source paths forward user/broker JWTs to invoker RPC and RLS. No service-role broad read enters model context.
-- Local CEO context switching resolves one of exactly five seeded role sessions while preserving the signed-in actor. Non-CEO context escalation is denied.
-- CEO ingestion authenticates before reading/writing uploads, uses a separate privileged writer, and compensates failed writes by deleting the newly created source. PostgREST writes are separate operations, not one database transaction.
-- Composite source/org foreign keys and restrictive live-record comparison protect structured origin and stale-index lifecycle.
-- Provider output is untrusted. Only known canonical evidence IDs can produce excerpts; model text/quotes and bounded payment contradictions are rejected.
-- Source bytes are local-only, path-contained, no-store, and authorized again by document RLS. Missing and forbidden source lookups share 404 responses.
-- History is actor/org/context scoped; replay reauthorizes current chunks and reconstructs every claim. Directly written stored text cannot become an answer.
-- Activity is session/context scoped and clears on process restart. No shared answer/evidence cache is introduced.
+## Executed proof and limits
 
-## Proof boundaries
+103 backend tests, 55 real local SQL assertions and 51 live authorization/refusal checks passed, including five roles, cross-org isolation, forged-context rejection, protected originals and actual zero-context HR refusal. Fresh PDF/OCR/typed integration and deletion were verified. Adapter/model-output fixtures are regression coverage, not live Gemini proof. Durable event reads survived API restarts; no shared answer/evidence cache exists.
 
-76 local backend tests pass, including exact prompt construction, forged context, evidence regressions, protected preview, history replay with current source reauthorization and discarded client-written trace metadata, and SSE release ordering. A 43-assertion pgTAP suite is prepared for all roles, cross-org isolation, typed rows, stale/deleted records, revocation, and chunk-only grants. It could not execute: localhost Postgres refused connections.
+Hosted RLS/Auth, production parser sandboxing, representative-scale filtered HNSW recall, exhaustive injection resistance and general semantic correctness are unverified. Audit persistence is best effort if the database is unavailable; deletion's audit is transactional. Already viewed bytes cannot be revoked.
 
-Security describes architecture and real request events. It does not probe live policies or independently count unauthorized model evidence; no unmeasured numeric zero is shown. Evaluation's checked forbidden-hit count is restricted to its actual synthetic cases and is separate from model-context claims.
+## Auth operator configuration
 
-Hosted RLS, clean current database migration/seed, live role flows, and live prompt-injection outcomes remain unverified or blocked. General entailment, exhaustive injection resistance, filtered ANN recall, concurrency, production file storage, parser isolation, rate limiting, and transactional ingestion remain review items. See [review status](REVIEW_NEEDED.md).
+Google completion needs a Web OAuth client, application origin, and Google authorized redirect URI pointing to the Supabase /auth/v1/callback (local: http://127.0.0.1:54321/auth/v1/callback). Configure client ID/secret in Supabase privately; local config may use env references. Add exact web /auth/callback and /auth/callback?next=/reset-password URLs to Supabase's redirect allowlist. Keep signup closed; provision organization/roles through an authorized operator. Hosted email delivery needs SMTP and the recovery template/redirect configured. These account/credential settings were not changed. [Official Google setup](https://supabase.com/docs/guides/auth/social-login/auth-google), [recovery contract](https://supabase.com/docs/reference/javascript/auth-resetpasswordforemail).
+
+Local email request, Mailpit delivery, PKCE exchange and usable reset form were verified. Invalid callback and missing recovery session show clear errors. Password update/success and wall-clock expiry were not executed against seeded accounts: browser credential changes require user handoff. Redirect targets are allowlisted server-side; external next URLs cannot redirect off-site.
+
+Resume runtime evidence: normal primary/fallback answers, exact generated previews, deleted-generated history invalidation and an actual Finance outbound-ID capture passed. In that isolated real integration the primary transport deadline was deliberately interrupted; fallback/Auth/RLS/embedding/history were real. Every outgoing ID on both attempts matched the Finance user's actual RLS-visible set. This is a scoped observation, not a global leak guarantee. Exact invoice lookup remains SECURITY INVOKER; single-invoice identity uses current visible siblings, and ambiguous-document/foreign-sibling tests fail closed.

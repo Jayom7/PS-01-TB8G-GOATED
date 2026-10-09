@@ -95,9 +95,9 @@ summary { cursor: pointer; }
 .source-table td { padding-block: 17px; }
 .source-cell { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
 .source-cell > div { min-width: 0; flex: 1; }
-.source-title-button { display: block; width: 100%; max-width: min(40vw,520px); padding: 0; border: 0; background: transparent; text-align: left; }
-.source-table .source-title-button strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.source-title-button:hover { color: var(--accent); }
+.source-table .source-name-label { max-width: min(40vw,520px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.source-actions { display: flex; align-items: center; justify-content: flex-end; gap: 16px; }
+.source-actions .danger-text { margin-left: 0; }
 .source-metadata { max-width: 500px; }
 .source-metadata summary { color: var(--muted) !important; font-size: 11px !important; padding: 4px 0 !important; }
 .source-metadata p { margin: 5px 0; font-size: 11px; overflow-wrap: anywhere; white-space: normal; }
@@ -267,7 +267,10 @@ summary { cursor: pointer; }
   .has-evidence .main-column { padding-inline: 16px; }
   .source-drawer.evidence-panel { left: 0; width: 100%; bottom: 200px; padding: 16px; }
   .evidence-panel .drawer-heading { top: -16px; }
-  .source-title-button { max-width: none; }
+  .source-table .source-name-label { max-width: none; }
+  .source-actions { flex-direction: column; align-items: flex-end; gap: 0; }
+  .source-actions .text-button { min-height: 44px; }
+  .knowledge-table .source-kind { max-width: 100%; white-space: normal; }
   .knowledge-table { table-layout: fixed; }
   .source-cell { gap: 8px; }
   .source-cell .source-symbol { width: 26px; height: 32px; }
@@ -299,4 +302,21 @@ summary { cursor: pointer; }
 .error-title { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
 @media (max-width: 1100px) {
   .has-evidence:has(.data-page) .evidence-panel { bottom: 0; }
+}
+
+/* Dark surface hierarchy: canvas, working surfaces, raised inspection, recessed input. */
+:root[data-theme="dark"] :is(.account-popover, .source-drawer, .drawer-heading) { background: var(--surface-raised); }
+:root[data-theme="dark"] :is(.source-table th, .source-list-scroll th) { background: var(--surface-raised); }
+:root[data-theme="dark"] :is(.composer, .source-search, .source-type-filter select, .field-label input, .field-label select, .field-label textarea, .login-form input) { background: var(--input-surface); }
+:root[data-theme="dark"] .composer textarea { background: transparent; }
+:root[data-theme="dark"] :is(.source-excerpt, .evidence-excerpt .source-excerpt) { background: var(--surface); }
+:root[data-theme="dark"] .navigation-item-active { background: var(--selected); }
+:root[data-theme="dark"] :is(.composer:focus-within, .source-search:focus-within, .field-label input:focus, .field-label select:focus, .field-label textarea:focus, .login-form input:focus) { background: var(--surface-raised); }
+:root[data-theme="dark"] :is(.quiet-button, .primary-action, .send-button, .oauth-button, .field-label input, .field-label select, .field-label textarea, .login-form input):disabled { color: var(--faint); background: var(--surface-muted); border-color: var(--line); opacity: 1; }
+:root[data-theme="dark"] .composer:has(textarea:disabled) { background: var(--surface-muted); }
+@media (hover: hover) and (pointer: fine) {
+  :root[data-theme="dark"] :is(.navigation-item:not(.navigation-item-active), .account-trigger, .account-action, .icon-button):hover,
+  :root[data-theme="dark"] :is(.quiet-button, .oauth-button):hover:not(:disabled),
+  :root[data-theme="dark"] .source-table tbody tr:hover { background: var(--surface-hover); }
+  :root[data-theme="dark"] .navigation-item-active:hover { background: var(--selected); color: var(--accent); }
 }

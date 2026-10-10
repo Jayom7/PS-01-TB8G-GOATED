@@ -12,6 +12,7 @@ from ps01_api.integrations import create_document_embedding, create_embedding, g
 
 def settings() -> Settings:
     return Settings(
+        _env_file=None,
         gemini_api_key=SecretStr("test-key"),
         gemini_chat_model="gemini-3.8-flash",
         gemini_embedding_model="gemini-embedding-2",
@@ -597,6 +598,107 @@ def redundant_settings():
     )
 
 
+@pytest.mark.parametrize("failure_kind", ["timeout", "unavailable"])
+async def test_generation_backoff_spans_projects_and_reauthorizes_each_send(
+    monkeypatch, failure_kind
+):
+    from ps01_api import integrations
+    from ps01_api.integrations import IntegrationFailure
+
+    delays, calls, gates = [], [], []
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    async def gate():
+        gates.append(len(calls))
+        return f"authorized evidence {len(gates)}"
+
+    def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(json.loads(request.content)["contents"][0]["parts"][0]["text"])
+        if failure_kind == "timeout":
+            raise httpx.ReadTimeout("synthetic timeout", request=request)
+        return httpx.Response(503)
+
+    monkeypatch.setattr(integrations.asyncio, "sleep", sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, redundant_settings(), "old evidence", gate)
+
+    assert delays == [1.0, 2.0, 4.0]
+    assert gates == [0, 1, 2, 3]
+    assert calls == [f"authorized evidence {n}" for n in range(1, 5)]
+    assert failure.value.code == (
+        "provider_timeout" if failure_kind == "timeout" else "provider_unavailable"
+    )
+    assert len(failure.value.model_attempts) == 4
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+async def test_generation_client_errors_never_back_off_or_try_secondary(monkeypatch, status):
+    from ps01_api import integrations
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    async def sleep(_delay):
+        pytest.fail("Permanent client errors must not enter retry backoff")
+
+    def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request)
+        return httpx.Response(status)
+
+    monkeypatch.setattr(integrations.asyncio, "sleep", sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure):
+            await generate_claims(client, redundant_settings(), "Question")
+    assert len(calls) == 1
+
+
+async def test_generation_total_budget_includes_retry_backoff():
+    from ps01_api.integrations import IntegrationFailure
+
+    config = redundant_settings()
+    config.generation_budget_seconds = 1
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, config, "Question")
+    assert failure.value.code == "provider_timeout"
+    assert len(calls) == 1
+    assert len(failure.value.model_attempts) == 1
+
+
+@pytest.mark.parametrize("details", [[1], [{"violations": [1]}]])
+async def test_malformed_quota_details_stop_model_failover_safely(details):
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request)
+        return httpx.Response(429, json={"error": {"details": details}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, settings(), "Question")
+    assert failure.value.code == "provider_rate_limited"
+    assert len(calls) == 1
+
+
 async def test_independent_project_failover_rechecks_authorization_and_records_attempts():
     from unittest.mock import AsyncMock
 
@@ -748,3 +850,252 @@ async def test_embedding_cooldown_recovers_with_a_bounded_probe():
         _circuit(config, "embedding:gemini-embedding-2").until = time.monotonic() - 1
         assert len(await create_embedding(client, config, "retry")) == 1536
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 503, 504])
+async def test_embedding_fallback_only_transient_statuses_rechecks_each_send(status):
+    from unittest.mock import AsyncMock
+
+    calls = []
+    gate = AsyncMock(return_value=None)
+
+    def handler(request):
+        assert gate.await_count == len(calls) + 1
+        calls.append(request)
+        return (
+            httpx.Response(status)
+            if len(calls) == 1
+            else httpx.Response(200, json={"embedding": {"values": [0.25] * 1536}})
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await create_embedding(client, redundant_settings(), "query", gate)
+    assert len(result) == 1536 and len(calls) == 2
+    assert calls[0].headers["x-goog-api-key"] != calls[1].headers["x-goog-api-key"]
+    assert calls[0].url == calls[1].url
+    first, second = (json.loads(call.content) for call in calls)
+    assert first == second
+    assert first["outputDimensionality"] == 1536
+    assert "embedContentConfig" not in first
+    assert first["model"] == "models/gemini-embedding-2"
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+async def test_embedding_permanent_failure_never_sends_to_secondary_even_in_cooldown(status):
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(2):
+            with pytest.raises(IntegrationFailure):
+                await create_embedding(client, redundant_settings(), "query")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["query", "document"])
+async def test_embedding_fallback_stops_before_secondary_after_authorization_revoked(kind):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    calls = []
+    gate = AsyncMock(side_effect=[None, HTTPException(403, "Access changed")])
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(HTTPException) as denied:
+            if kind == "query":
+                await create_embedding(client, redundant_settings(), "private query", gate)
+            else:
+                await create_document_embedding(
+                    client, redundant_settings(), "Source", "private passage", gate
+                )
+    assert denied.value.status_code == 403
+    assert len(calls) == 1 and gate.await_count == 2
+
+
+@pytest.mark.parametrize("failure_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_embedding_transport_failure_has_one_secondary_attempt(failure_type):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise failure_type("synthetic transport failure", request=request)
+        return httpx.Response(200, json={"embedding": {"values": [0.25] * 1536}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert len(await create_embedding(client, redundant_settings(), "query")) == 1536
+    assert len(calls) == 2
+
+
+async def test_embedding_total_budget_includes_authorization_wait_and_sends_nothing():
+    import asyncio
+
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+    config = redundant_settings()
+    config.generation_budget_seconds = 1
+
+    async def gate():
+        await asyncio.sleep(2)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: calls.append(r))
+    ) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await create_embedding(client, config, "query", gate)
+    assert failure.value.code == "provider_timeout"
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "misconfiguration", ["missing_primary", "missing_id", "same_id", "same_key", "wrong_model"]
+)
+async def test_embedding_invalid_configuration_is_rejected_before_network(misconfiguration):
+    from ps01_api.integrations import IntegrationFailure
+
+    config = redundant_settings()
+    if misconfiguration == "missing_primary":
+        config.gemini_api_key = None
+    elif misconfiguration == "missing_id":
+        config.gemini_secondary_project_id = None
+    elif misconfiguration == "same_id":
+        config.gemini_secondary_project_id = " " + config.gemini_project_id + " "
+    elif misconfiguration == "same_key":
+        config.gemini_secondary_api_key = config.gemini_api_key
+    else:
+        config.gemini_embedding_model = "another-model"
+    calls = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: calls.append(r))
+    ) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await create_embedding(client, config, "query")
+    assert failure.value.code == "provider_invalid_request"
+    assert not calls
+
+
+async def test_embedding_malformed_vector_does_not_trigger_secondary():
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"embedding": {"values": [0.25] * 3072}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await create_embedding(client, redundant_settings(), "query")
+    assert failure.value.code == "provider_invalid_response" and len(calls) == 1
+
+
+async def test_both_embedding_projects_exhausted_stop_at_two_requests_until_cooldown():
+    from unittest.mock import AsyncMock
+
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+    gate = AsyncMock(return_value=None)
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(3):
+            with pytest.raises(IntegrationFailure) as failure:
+                await create_embedding(client, redundant_settings(), "query", gate)
+            assert failure.value.code == "provider_rate_limited"
+    assert len(calls) == gate.await_count == 2
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 413, 422])
+@pytest.mark.parametrize("kind", ["embedding", "generation"])
+async def test_permanent_provider_errors_remain_terminal_during_cooldown(status, kind):
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request)
+        return httpx.Response(status)
+
+    config = redundant_settings()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for _ in range(2):
+            with pytest.raises(IntegrationFailure) as failure:
+                if kind == "embedding":
+                    await create_embedding(client, config, "query")
+                else:
+                    await generate_claims(client, config, "Select evidence.")
+            assert failure.value.code in {
+                "provider_invalid_request",
+                "provider_authentication_failed",
+                "provider_invalid_model",
+            }
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("value", [True, "0.5", float("nan"), float("inf"), 10**400])
+async def test_invalid_vector_values_fail_closed_without_secondary(value):
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        # Raw JSON permits adversarial non-finite values for response parsing.
+        return httpx.Response(200, content=json.dumps({"embedding": {"values": [value] * 1536}}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await create_embedding(client, redundant_settings(), "query")
+    assert failure.value.code == "provider_invalid_response" and len(calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["catalogue", "generation"])
+async def test_malformed_provider_objects_fail_closed_without_secondary(kind):
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            return (
+                httpx.Response(200, json={"models": [None]}) if kind == "catalogue" else inventory()
+            )
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, redundant_settings(), "Select evidence.")
+    assert failure.value.code == "provider_invalid_response"
+    assert len(calls) == (1 if kind == "catalogue" else 2)
+
+
+async def test_missing_generation_credentials_are_configuration_error_without_network():
+    from ps01_api.integrations import IntegrationFailure
+
+    config = settings()
+    config.gemini_api_key = None
+    calls = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: calls.append(r))
+    ) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, config, "Select evidence.")
+    assert failure.value.code == "provider_invalid_request" and not calls

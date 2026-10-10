@@ -46,11 +46,18 @@ def record_excerpt(table: str, row_id: str, fields: dict[str, Any]) -> str:
         except (ValueError, TypeError):
             raise IngestionError("Invoice amount and dates must be valid") from None
         overdue = fields["payment_status"] == "unpaid" and due < as_of
+        invoice_date = ""
+        if fields.get("invoice_date"):
+            try:
+                invoice_date = f" Invoice date: {date.fromisoformat(fields['invoice_date'])}."
+            except (ValueError, TypeError):
+                raise IngestionError("Invoice date must be valid") from None
         return (
             f"Invoice {row_id} for {fields.get('customer', 'the customer')} totals "
             f"{fields['currency']} {amount:,.2f}. Payment status: {fields['payment_status']}. "
             f"Due date: {due}; status as of: {as_of}. "
             f"Overdue as of that date: {'yes' if overdue else 'no'}."
+            f"{invoice_date}"
         )
     return f"{table} / {row_id}. " + "; ".join(
         f"{key.replace('_', ' ')}: {value}" for key, value in fields.items()

@@ -40,12 +40,13 @@ from .integrations import (
     verify_supabase_session,
 )
 from .rag import (
-    ambiguous_invoice,
     citation_from_row,
     insufficient_evidence,
     interpret_followup,
+    invoice_evidence_conflicts,
     normalize_question,
     prepare_generation_context,
+    record_clarification,
     relevant_passage,
     small_talk,
     validate_generation,
@@ -941,18 +942,48 @@ async def _store_ingested(
         ]
     semaphore = asyncio.Semaphore(3)
 
+    async def before_embedding_attempt():
+        current_identity = await _identity(client, settings, actor_token)
+        _, current_role = await _context_token(
+            client, settings, actor_token, current_identity, "CEO"
+        )
+        if (
+            current_identity["user_id"] != identity["user_id"]
+            or current_identity["organization_id"] != identity["organization_id"]
+            or current_identity["role"] != "CEO"
+            or current_role != "CEO"
+        ):
+            raise HTTPException(status_code=403, detail="Ingestion access context changed")
+
     async def embed(candidate):
         async with semaphore:
-            return await create_document_embedding(client, settings, source_name, candidate.content)
+            return await create_document_embedding(
+                client,
+                settings,
+                source_name,
+                candidate.content,
+                before_attempt=before_embedding_attempt,
+            )
 
+    embedding_tasks = [asyncio.create_task(embed(candidate)) for candidate in candidates]
     try:
-        embeddings = await asyncio.gather(*(embed(candidate) for candidate in candidates))
-    except (IntegrationFailure, httpx.HTTPError) as exc:
+        try:
+            embeddings = await asyncio.gather(*embedding_tasks)
+        except BaseException:
+            # gather does not cancel siblings on failure. Stop queued/private
+            # provider sends before compensating the unpublished document.
+            for task in embedding_tasks:
+                task.cancel()
+            await asyncio.gather(*embedding_tasks, return_exceptions=True)
+            raise
+    except (IntegrationFailure, httpx.HTTPError, HTTPException) as exc:
         await client.delete(
             f"{base}/documents", params={"id": f"eq.{source_id}"}, headers=admin_headers
         )
         if isinstance(exc, IntegrationFailure):
             exc.stage = "embedding"
+            raise
+        if isinstance(exc, HTTPException):
             raise
         failure = IntegrationFailure(
             "Embedding transport failed",
@@ -1416,8 +1447,25 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 return response
             await progress("searching_knowledge")
             embedding_started = time.perf_counter()
+
+            async def before_query_embedding_attempt():
+                nonlocal access_token
+                current_identity = await _identity(client, settings, actor_token)
+                scoped, current_role = await _context_token(
+                    client, settings, actor_token, current_identity, demo_role
+                )
+                if (
+                    current_identity["user_id"] != identity["user_id"]
+                    or current_identity["organization_id"] != identity["organization_id"]
+                    or current_role != active_role
+                ):
+                    raise HTTPException(status_code=403, detail="Access context changed")
+                access_token = scoped
+
             try:
-                embedding = await create_embedding(client, settings, effective_query)
+                embedding = await create_embedding(
+                    client, settings, effective_query, before_attempt=before_query_embedding_attempt
+                )
             finally:
                 timings["embedding_ms"] = round((time.perf_counter() - embedding_started) * 1000, 1)
             retrieval_started = time.perf_counter()
@@ -1437,8 +1485,8 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 (time.perf_counter() - recheck_started) * 1000, 1
             )
             prompt, model_context = prepare_generation_context(effective_query, evidence)
-            if ambiguous_invoice(effective_query, evidence):
-                clarification = "Which invoice do you mean? Please include its invoice ID."
+            clarification = record_clarification(effective_query, evidence)
+            if clarification:
                 result = {"state": "CLARIFICATION_NEEDED", "message": clarification, "claims": []}
                 model_context = []
                 generation_model = None
@@ -1447,6 +1495,9 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
             ):
                 result = insufficient_evidence()
                 model_context: list[dict[str, object]] = []
+                generation_model = None
+            elif invoice_evidence_conflicts(effective_query, model_context):
+                result = {"state": "EVIDENCE_CONFLICT", "claims": []}
                 generation_model = None
             else:
 
@@ -1823,6 +1874,7 @@ async def delete_source(
 @app.get("/api/v1/sources/{source_id}", tags=["sources"])
 async def get_source(
     source_id: Annotated[UUID, ApiPath()],
+    evidence_id: Annotated[str | None, Query(max_length=80)] = None,
     authorization: str | None = Header(default=None),
     demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
@@ -1860,7 +1912,15 @@ async def get_source(
     rows = response.json()
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=404, detail="Source not found")
-    return await _source_payload(rows[0], authorization, demo_role)
+    row = rows[0]
+    if evidence_id is not None:
+        # Resolve the passage after RLS, never accept a browser-supplied excerpt,
+        # location, or arbitrary passage offset as authoritative.
+        _, canonical = prepare_generation_context("", [{**row, "chunk_id": row["id"]}])
+        row = next((item for item in canonical if item["evidence_id"] == evidence_id), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Source not found")
+    return await _source_payload(row, authorization, demo_role)
 
 
 @app.get("/api/v1/sources/{source_id}/preview", tags=["sources"])
@@ -2292,14 +2352,24 @@ async def conversation(
                 replay_query, [{**item, "chunk_id": item["id"]} for item in current]
             )
             rebuilt = validate_generation({"claims": references}, canonical)
+            if references and not canonical:
+                rebuilt = {"state": "SOURCE_UNAVAILABLE", "claims": []}
             if saved.get("state") == "VERIFIED_EVIDENCE":
                 # The saved mode/text is not proof of a provider failure. Re-run
                 # the deterministic extractor on currently visible references.
                 rebuilt = verified_evidence_response(replay_query, canonical)
+                if not canonical:
+                    rebuilt = {"state": "SOURCE_UNAVAILABLE", "claims": []}
                 rebuilt["message"] = (
                     "Verified evidence response: reconstructed without a language model. "
                     "History replay did not rerun provider availability."
                 )
+            elif not claims and saved.get("state") in {
+                "CITATION_VALIDATION_FAILED", "EVIDENCE_CONFLICT"
+            }:
+                # Preserve a recorded failure category, never saved prose or
+                # facts. A new search is needed to establish current evidence.
+                rebuilt = {"state": saved["state"], "claims": []}
             greeting = small_talk(row["query"])
             if greeting:
                 rebuilt = {"state": "SMALL_TALK", "claims": [], "message": greeting}
@@ -2308,7 +2378,7 @@ async def conversation(
                     "state": "CLARIFICATION_NEEDED",
                     "claims": [],
                     "message": clarification
-                    or "Which invoice do you mean? Please include its invoice ID.",
+                    or "Which record do you mean? Please include its record ID or exact name.",
                 }
             row["response"] = {
                 "request_id": row.get("id", str(uuid4())),

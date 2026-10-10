@@ -185,7 +185,7 @@ def test_reopen_revoked_citation_removes_saved_answer_and_source_title():
         response = TestClient(app).get(f"/api/v1/conversations/{ID}", headers=HEADERS)
     assert response.status_code == 200
     assert "Restricted title" not in response.text
-    assert response.json()["turns"][0]["response"]["state"] == "INSUFFICIENT_EVIDENCE"
+    assert response.json()["turns"][0]["response"]["state"] == "SOURCE_UNAVAILABLE"
 
 
 def test_hide_conversation_uses_actor_session_and_all_scope_predicates():
@@ -331,6 +331,60 @@ def test_history_rebuilds_invoice_identity_from_current_authorized_siblings():
     assert response.status_code == 200
     result = response.json()["turns"][0]["response"]
     assert result["state"] == "CITATION_VALIDATED"
-    assert result["claims"][0]["text"] == "The scanned source shows USD 1,234.00."
+    assert result["claims"][0]["text"] == "Invoice CF-INV-1009 totals USD 1,234.00."
     assert reads.await_args.kwargs["params"]["document_id"] == f"in.({ID})"
     assert reads.await_args.args[2] == "actor-token"
+
+
+@pytest.mark.parametrize(
+    "evidence_id,rows,expected",
+    [
+        (
+            f"{ID}:1",
+            [
+                {
+                    "id": ID,
+                    "document_id": ID,
+                    "source_type": "pdf",
+                    "page_number": 2,
+                    "content": "Document heading. Invoices are payable within thirty days.",
+                }
+            ],
+            200,
+        ),
+        (f"{ID}:0", [], 404),
+        (
+            "forged:1",
+            [{"id": ID, "source_type": "pdf", "page_number": 2, "content": "Authorized."}],
+            404,
+        ),
+    ],
+)
+def test_evidence_inspector_resolves_exact_current_passage(evidence_id, rows, expected):
+    captured = []
+
+    async def handle(request):
+        captured.append(request)
+        return httpx.Response(200, json=rows)
+
+    @asynccontextmanager
+    async def client():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as instance:
+            yield instance
+
+    with (
+        patch("ps01_api.main._identity", AsyncMock(return_value=IDENTITY)),
+        patch("ps01_api.main.require_session", AsyncMock(return_value="actor-token")),
+        patch("ps01_api.main.request_client", client),
+    ):
+        response = TestClient(app).get(
+            f"/api/v1/sources/{ID}", headers=HEADERS, params={"evidence_id": evidence_id}
+        )
+    assert response.status_code == expected
+    assert captured[0].headers["authorization"] == "Bearer actor-token"
+    if expected == 200:
+        assert response.json()["excerpt"] == "Invoices are payable within thirty days."
+        assert response.json()["location"] == {"page": 2}
+        assert response.json()["evidence_id"] == evidence_id
+    else:
+        assert response.json() == {"detail": "Source not found"}

@@ -9,12 +9,13 @@ import { Icon, type IconName } from "@/components/icons";
 import { createClient } from "@/lib/supabase/client";
 import { sessionToken } from "@/lib/session";
 import { initialIngestion, ingestionReducer, ingestionErrorMessage, type IngestionStatus } from "@/lib/ingestion-state";
-import { appendTurn, chatErrorMessage, groupCitations } from "@/lib/chat-state";
+import { appendTurn, chatErrorMessage, chatFailureTitle, citationKey, groupCitations } from "@/lib/chat-state";
 
 export type View = "Dashboard" | "Ask" | "Sources" | "Ingest" | "Security" | "Evaluation";
 type Citation = {
   document_id?: string | null;
   citation_id: string;
+  evidence_id?: string | null;
   source_type: string;
   title: string | null;
   location: Record<string, string | number | unknown>;
@@ -24,7 +25,7 @@ type QueryResult = {
   request_id: string;
   conversation_id?: string;
   message?: string;
-  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "VERIFIED_EVIDENCE" | "INSUFFICIENT_EVIDENCE" | "CLARIFICATION_NEEDED";
+  state: "SMALL_TALK" | "CITATION_VALIDATED" | "PARTIALLY_CITATION_VALIDATED" | "VERIFIED_EVIDENCE" | "INSUFFICIENT_EVIDENCE" | "CLARIFICATION_NEEDED" | "CITATION_VALIDATION_FAILED" | "EVIDENCE_CONFLICT" | "SOURCE_UNAVAILABLE";
   claims: Claim[];
   trace: {
     session_verified: boolean;
@@ -38,6 +39,7 @@ type QueryResult = {
     history_saved?: boolean;
     history_replay?: boolean;
     canonical_evidence_count?: number;
+    provider_failure?: { code: string; retry_after_seconds?: number | null } | null;
   };
 };
 type SourcePreview = {
@@ -334,7 +336,11 @@ export default function Workspace({ identity, view }: { identity: string; view: 
         body: JSON.stringify({ query: question, ...(conversationId ? { conversation_id: conversationId } : {}) }),
         signal: AbortSignal.timeout(90_000),
       });
-      if (!response.ok) await readResponse(response);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        setAskFailure(chatFailureTitle({ ...payload, status: response.status }));
+        throw new Error(chatErrorMessage(payload, response.status));
+      }
       const reader = response.body?.getReader();
       if (!reader) throw new Error("The response stream is unavailable.");
       const decoder = new TextDecoder();
@@ -352,7 +358,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           if (kind === "progress") setStage(payload.stage);
           if (kind === "error") {
             if (payload.code === "session_expired") sessionExpired();
-            setAskFailure(payload.code === "provider_invalid_response" ? "Response validation failed" : payload.code === "retrieval_unavailable" ? "Authorized search unavailable" : payload.code === "evidence_changed" ? "Evidence changed" : payload.code === "authorization_denied" ? "Access denied" : payload.code === "provider_safety_block" ? "Rephrase this request" : payload.code?.startsWith("provider_") ? "Generation unavailable" : "Answer unavailable");
+            setAskFailure(chatFailureTitle(payload));
             setRetryEvidence(payload.evidence ?? []);
             throw new Error(chatErrorMessage(payload));
           }
@@ -361,7 +367,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
             setResult(payload);
             setConversationId(payload.conversation_id ?? null);
             setTurns((previous) => appendTurn(previous, { query: question, response: payload }));
-            setQuery("");
+            setQuery(payload.state === "CITATION_VALIDATION_FAILED" ? question : "");
             complete = true;
           }
         }
@@ -377,6 +383,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     } finally {
       askInFlight.current = false;
       setPending(false);
+      document.getElementById("query-input")?.focus();
     }
   }
 
@@ -386,15 +393,16 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     setActiveSource({
       citation_id: citation.citation_id,
       source_type: citation.source_type,
-      title: citation.title,
+      title: null,
       source_id: null,
-      location: citation.location,
+      location: {},
       excerpt: "Loading the exact source excerpt…",
     });
     setSourceError(null);
     const requestedRole = activeRole;
     try {
-      const source = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(citation.citation_id)}`, activeRole || undefined);
+      const passage = citation.evidence_id ? `?evidence_id=${encodeURIComponent(citation.evidence_id)}` : "";
+      const source = await apiGet<SourcePreview>(`/api/v1/sources/${encodeURIComponent(citation.citation_id)}${passage}`, activeRole || undefined);
       if (sourceRequest.current === requestNumber && activeRoleRef.current === requestedRole) setActiveSource(source);
     } catch (cause) {
       if (sourceRequest.current === requestNumber && activeRoleRef.current === requestedRole) setSourceError(cause instanceof Error ? cause.message : "This source is unavailable.");
@@ -481,13 +489,19 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     try {
       const data = await apiGet<{ conversations: typeof conversations }>("/api/v1/conversations", activeRole || undefined);
       if (activeRoleRef.current === activeRole) setConversations(data.conversations);
-      setHistoryError(null);
-    } catch (cause) { setHistoryError(networkMessage(cause, "Conversation history is unavailable. Please retry.")); }
+      if (activeRoleRef.current === activeRole) setHistoryError(null);
+    } catch (cause) { if (activeRoleRef.current === activeRole) setHistoryError(networkMessage(cause, "Conversation history is unavailable. Please retry.")); }
     finally { setHistoryLoading(false); }
   }
 
   async function reopenConversation(id: string) {
-    if (pending) return;
+    if (pending || askInFlight.current) return;
+    askInFlight.current = true;
+    setPending(true);
+    setError(null);
+    setHistoryError(null);
+    setRetryEvidence([]);
+    setStage("loading_history");
     try {
       const data = await apiGet<{ turns: { query: string; response: QueryResult }[] }>(`/api/v1/conversations/${id}`, activeRole || undefined);
       if (activeRoleRef.current !== activeRole) return;
@@ -501,6 +515,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
       setQuery("");
       setHistoryOpen(false);
     } catch (cause) { setHistoryError(networkMessage(cause, "Conversation is outside your current access scope.")); }
+    finally { askInFlight.current = false; setPending(false); }
   }
 
   async function removeConversation(id: string) {
@@ -519,6 +534,8 @@ export default function Workspace({ identity, view }: { identity: string; view: 
     closeSource();
     setTraceOpen(false);
     setConversationId(null); setTurns([]); setResult(null); setAskedQuery(""); setQuery(""); setError(null);
+    setRetryEvidence([]); setHistoryError(null); setHistoryOpen(false);
+    document.getElementById("query-input")?.focus();
   }
 
   useEffect(() => {
@@ -838,6 +855,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
               onTrace={() => setTraceOpen(true)}
               onNew={newConversation}
               onHistory={() => { setHistoryOpen((value) => !value); void loadHistory(); }}
+              onReloadHistory={() => void loadHistory()}
               historyOpen={historyOpen}
               conversations={conversations}
               historyError={historyError}
@@ -897,7 +915,7 @@ export default function Workspace({ identity, view }: { identity: string; view: 
           ["Retrieval", "Database policies applied before results are returned"],
           ["Evidence", result.trace.history_replay ? `${result.trace.canonical_evidence_count ?? 0} current authorized passages checked` : `${result.trace.evidence_items_sent_to_model} canonical passages in context`],
           ["Generation", result.trace.history_replay ? "Not rerun" : result.state === "VERIFIED_EVIDENCE" ? "Composed from verified evidence without a language model" : result.trace.generation_model ? "Model selection completed" : "Not required"],
-          ["Citation validation", "Evidence IDs resolved to canonical source excerpts"],
+          ["Citation validation", result.claims.length ? "Evidence IDs resolved to canonical source excerpts" : "No factual answer released"],
         ].map(([label, value]) => <li key={label}><strong>{label}</strong><span>{value}</span></li>)}</ol>
         <dl className="source-facts">{Object.entries(result.trace.timing_ms).map(([key, value]) => <div key={key}><dt>{timingLabel(key)}</dt><dd>{typeof value === "number" ? `${Math.round(value)} ms` : "Not measured"}</dd></div>)}</dl>
         <p className="trace-disclaimer">Extractive evidence selection. Semantic entailment and relevance are not independently verified. Unauthorized evidence is not independently counted in this trace.</p>
@@ -907,20 +925,21 @@ export default function Workspace({ identity, view }: { identity: string; view: 
   );
 }
 
-function AskView({ failureTitle, availableSources, identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource, turns, stage, onTrace, onNew, onHistory, historyOpen, conversations, historyError, historyLoading, retryEvidence, onReopen, onRemove }: {
+function AskView({ failureTitle, availableSources, identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource, turns, stage, onTrace, onNew, onHistory, onReloadHistory, historyOpen, conversations, historyError, historyLoading, retryEvidence, onReopen, onRemove }: {
   failureTitle: string; availableSources: Source[]; identity: string; role: string; query: string; setQuery: (value: string) => void; askedQuery: string;
   result: QueryResult | null; pending: boolean; error: string | null;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRetry: () => void;
   onSource: (citation: Citation, trigger: HTMLElement) => void;
   turns: { query: string; response: QueryResult }[]; stage: string; onTrace: () => void; onNew: () => void;
-  onHistory: () => void; historyOpen: boolean; conversations: { id: string; title: string; updated_at: string }[];
+  onHistory: () => void; onReloadHistory: () => void; historyOpen: boolean; conversations: { id: string; title: string; updated_at: string }[];
   historyLoading: boolean; retryEvidence: Citation[];
   historyError: string | null; onReopen: (id: string) => void; onRemove: (id: string) => void;
 }) {
-  const progressLabel: Record<string, string> = {connecting: "Preparing the question", checking_access: "Checking access", access_checked: "Access checked", searching_knowledge: "Searching authorized sources", retrieval_complete: "Search complete", checking_references: "Checking source references", evidence_selected: "Evidence selected", generating_response: "Selecting evidence with the model", checking_final_access: "Rechecking source access", composing_verified_evidence: "Composing a verified evidence response", validating_citations: "Checking citations", validation_complete: "Finishing the conversation"};
+  const progressLabel: Record<string, string> = {loading_history: "Rechecking saved sources", connecting: "Preparing the question", checking_access: "Checking access", access_checked: "Access checked", searching_knowledge: "Searching authorized sources", retrieval_complete: "Search complete", checking_references: "Checking source references", evidence_selected: "Evidence selected", generating_response: "Selecting evidence with the model", checking_final_access: "Rechecking source access", composing_verified_evidence: "Composing a verified evidence response", validating_citations: "Checking citations", validation_complete: "Finishing the conversation"};
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (!pending && (turns.length || error)) document.getElementById("query-input")?.focus();
   }, [turns.length, pending, error]);
   const examples = starterQuestions(availableSources);
   const messages = turns.length ? turns : result ? [{ query: askedQuery, response: result }] : [];
@@ -928,25 +947,26 @@ function AskView({ failureTitle, availableSources, identity, role, query, setQue
     <div className="conversation-header"><div><h1>Ask your knowledge.</h1><p>A question. An answer. The evidence behind it.</p></div><div className="conversation-controls"><button className="quiet-button" type="button" disabled={pending} aria-expanded={historyOpen} onClick={onHistory}><Icon name="files" size={15} />History</button><button className="quiet-button" type="button" disabled={pending} onClick={onNew}>New conversation</button></div></div>
     <div className="ask-context"><Icon name="lock" size={14} /><span>{role}</span><span>Access checked before search</span></div>
     <div className={`ask-layout ${historyOpen ? "with-history" : ""}`}>
-      {historyOpen && <aside className="conversation-history" aria-label="Conversation history"><div className="history-heading"><h2>Conversations</h2><button className="icon-button" type="button" aria-label="Close history" onClick={onHistory}><Icon name="close" size={16} /></button></div><p>In your current access context</p>{historyLoading ? <p role="status">Loading conversations…</p> : historyError ? <p role="status">{historyError}</p> : conversations.length ? <ol>{conversations.map((entry) => <li key={entry.id}><button type="button" disabled={pending} onClick={() => onReopen(entry.id)}><strong>{entry.title}</strong><small>{formatTime(entry.updated_at)}</small></button><button className="history-remove" type="button" disabled={pending} aria-label={`Remove conversation ${entry.title}`} onClick={() => onRemove(entry.id)}><Icon name="close" size={14} /></button></li>)}</ol> : <p>No conversations saved yet.</p>}</aside>}
+      {historyOpen && <aside className="conversation-history" aria-label="Conversation history"><div className="history-heading"><h2>Conversations</h2><button className="icon-button" type="button" aria-label="Close history" onClick={onHistory}><Icon name="close" size={16} /></button></div><p>In your current access context</p>{historyLoading ? <p role="status">Loading conversations…</p> : historyError ? <div role="status"><p>{historyError}</p><button className="text-button" type="button" disabled={pending || historyLoading} onClick={onReloadHistory}>Retry history</button></div> : conversations.length ? <ol>{conversations.map((entry) => <li key={entry.id}><button type="button" disabled={pending} onClick={() => onReopen(entry.id)}><strong>{entry.title}</strong><small>{formatTime(entry.updated_at)}</small></button><button className="history-remove" type="button" disabled={pending} aria-label={`Remove conversation ${entry.title}`} onClick={() => onRemove(entry.id)}><Icon name="close" size={14} /></button></li>)}</ol> : <p>No conversations saved yet.</p>}</aside>}
       <div className="ask-main"><div className="conversation-scroll" ref={scrollRef}>
       {messages.length ? <div className="message-thread" aria-live="polite">{messages.map((turn) => <div className="conversation-turn" key={turn.response.request_id}>
         <div className="question-bubble"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{turn.query}</p></div>
-        {(turn.response.state === "SMALL_TALK" || turn.response.state === "CLARIFICATION_NEEDED") ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>{turn.response.state === "SMALL_TALK" ? "Conversation helper · no company-data lookup" : "Please clarify · no factual answer released"}</small></div></div> : turn.response.state === "INSUFFICIENT_EVIDENCE" ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">Insufficient authorized evidence</p><p className="response-secondary">I couldn’t find enough evidence within your current access. Try a more specific question or contact your workspace administrator.</p></div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className={`answer-label answer-state state-${turn.response.state.toLowerCase()}`}>{turn.response.state === "VERIFIED_EVIDENCE" ? "Composed without a language model" : turn.response.state === "PARTIALLY_CITATION_VALIDATED" ? "Partial citation validation" : "Answer · citations validated"}</h2>
-        {turn.response.claims.map((claim, index) => <p key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citation.citation_id}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citation.citation_id)}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citation.citation_id)}]</button>)}</p>)}
-        <div className="answer-sources" role="region" aria-label="Answer sources" tabIndex={0}>{groupCitations(turn.response.claims.flatMap((claim) => claim.citations)).map((group) => group.citations.length === 1 ? <button className="inline-citation" key={group.key} type="button" aria-label={`Open evidence: ${group.title}`} onClick={(event) => onSource(group.citations[0], event.currentTarget)}>{group.title} · {formatLocation(group.citations[0].location)}</button> : <details className="citation-group" key={group.key}><summary>{group.title} · {group.citations.length} references</summary>{group.citations.map((citation) => <button className="text-button" key={`${citation.citation_id}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{formatLocation(citation.location)}</button>)}</details>)}</div>
+        {(turn.response.state === "SMALL_TALK" || turn.response.state === "CLARIFICATION_NEEDED") ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p><small>{turn.response.state === "SMALL_TALK" ? "Conversation helper · no company-data lookup" : "Please clarify · no factual answer released"}</small></div></div> : ["INSUFFICIENT_EVIDENCE", "CITATION_VALIDATION_FAILED", "EVIDENCE_CONFLICT", "SOURCE_UNAVAILABLE"].includes(turn.response.state) ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">{turn.response.state === "CITATION_VALIDATION_FAILED" ? (turn.response.trace.history_replay ? "Recorded validation failure" : "The response could not be validated") : turn.response.state === "EVIDENCE_CONFLICT" ? (turn.response.trace.history_replay ? "Recorded evidence conflict" : "The available evidence disagrees") : turn.response.state === "SOURCE_UNAVAILABLE" ? "Source unavailable in this context" : "Not enough authorized evidence"}</p><p className="response-secondary">{turn.response.trace.history_replay && ["CITATION_VALIDATION_FAILED", "EVIDENCE_CONFLICT"].includes(turn.response.state) ? "This saved question did not produce a reliable answer. Ask again to check current sources." : turn.response.state === "CITATION_VALIDATION_FAILED" ? "No factual answer was released. Retry the question to check current sources." : turn.response.state === "EVIDENCE_CONFLICT" ? "I couldn’t give a reliable answer from the available evidence. Please specify the record and fact you want checked." : turn.response.state === "SOURCE_UNAVAILABLE" ? "This saved answer cannot be shown using your current source access. Ask again to search the sources available now." : "I couldn’t find enough evidence to answer that. Try an exact record ID or a more specific question."}</p>{turn.response.state === "CITATION_VALIDATION_FAILED" && turn.response.request_id === result?.request_id && <button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button>}</div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className={`answer-label answer-state state-${turn.response.state.toLowerCase()}`}>{turn.response.state === "VERIFIED_EVIDENCE" ? "Composed without a language model" : turn.response.state === "PARTIALLY_CITATION_VALIDATED" ? "Partial citation validation" : turn.response.trace.history_replay ? "Source-backed answer · access rechecked" : turn.response.trace.generation_model ? "Model-selected answer" : "Source-backed answer"}</h2>
+        <p className="answer-paragraph">{turn.response.claims.map((claim, index) => <span className="cited-claim" key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citationKey(citation)}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citationKey(citation))}: ${citation.title ?? "Authorized source"}, ${formatLocation(citation.location)}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citationKey(citation))}]</button>)}{" "}</span>)}</p>
+        <details className="answer-source-details"><summary>Inspect sources</summary><div className="answer-sources" role="region" aria-label="Answer sources" tabIndex={0}>{groupCitations(turn.response.claims.flatMap((claim) => claim.citations)).map((group) => group.citations.length === 1 ? <button className="inline-citation" key={group.key} type="button" aria-label={`Open evidence: ${group.title}`} onClick={(event) => onSource(group.citations[0], event.currentTarget)}>{group.title} · {formatLocation(group.citations[0].location)}</button> : <details className="citation-group" key={group.key}><summary>{group.title} · {group.citations.length} references</summary>{group.citations.map((citation) => <button className="text-button" key={`${citationKey(citation)}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{formatLocation(citation.location)}</button>)}</details>)}</div></details>
+        {turn.response.state === "VERIFIED_EVIDENCE" && turn.response.trace.provider_failure && <p className="response-secondary">{turn.response.trace.provider_failure.code === "provider_timeout" ? "The answer service timed out." : "The answer service is temporarily unavailable."} This response was composed directly from the cited sources.</p>}
         <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
         {turn.response.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Some selected evidence could not be validated. Only accepted excerpts are shown.</p>}
         {turn.response.trace.history_saved === false && <p className="response-secondary">This answer could not be saved to history.</p>}
         </div></div>}
-      </div>)}</div> : !pending && !error && <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="search" size={26} /></div><h2>Clarity starts with<br />a good question.</h2><p>Connect the details across documents, scans, and records.<br />Every business answer starts with your authorized sources.</p>{examples.length > 0 && <div className="question-examples" aria-label="Questions from accessible demo sources">{examples.map((example) => <button className="sample-question" type="button" key={example.question} onClick={() => { setQuery(example.question); document.getElementById("query-input")?.focus(); }}><span><small><Icon name={example.icon} size={14} />{example.label}</small>{example.question}</span><Icon name="arrow" size={17} /></button>)}</div>}</div>}
+      </div>)}</div> : !pending && !error && <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="search" size={26} /></div><h2>What would you like to know?</h2><p>Ask about a document, an invoice, or a business record.<br />Follow the citations back to the original.</p>{examples.length > 0 && <div className="question-examples" aria-label="Questions from accessible demo sources">{examples.map((example) => <button className="sample-question" type="button" key={example.question} onClick={() => { setQuery(example.question); document.getElementById("query-input")?.focus(); }}><span><small><Icon name={example.icon} size={14} />{example.label}</small>{example.question}</span><Icon name="arrow" size={17} /></button>)}</div>}</div>}
       {(pending || error) && askedQuery && !result && <div className="question-bubble pending-question"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{askedQuery}</p></div>}
       {pending && <div className="query-progress current-progress" role="status" aria-live="polite"><span className="progress-dot" aria-hidden="true" />{progressLabel[stage] ?? "Preparing the question"}</div>}
       {error && <div className="request-error" role="alert"><strong className="error-title">{failureTitle}</strong><p>{error}</p><button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button></div>}
-      {error && retryEvidence.length > 0 && <details className="retry-evidence"><summary>Sources found before generation stopped</summary><p>Open a source to recheck your current access.</p><div className="retry-source-list" role="region" aria-label="Sources available before generation stopped" tabIndex={0}>{retryEvidence.slice(0, 8).map((citation) => <button className="text-button" key={`${citation.citation_id}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{citation.title ?? "Authorized source"} · {formatLocation(citation.location)}</button>)}</div></details>}
+      {error && retryEvidence.length > 0 && <details className="retry-evidence"><summary>Sources found before generation stopped</summary><p>Open a source to recheck your current access.</p><div className="retry-source-list" role="region" aria-label="Sources available before generation stopped" tabIndex={0}>{retryEvidence.slice(0, 8).map((citation) => <button className="text-button" key={`${citationKey(citation)}-${JSON.stringify(citation.location)}`} type="button" onClick={(event) => onSource(citation, event.currentTarget)}>{citation.title ?? "Authorized source"} · {formatLocation(citation.location)}</button>)}</div></details>}
       {result && !pending && <button className="trace-control text-button" type="button" onClick={onTrace}>View retrieval trace <Icon name="arrow" size={14} /></button>}
       </div>
-      <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Waiting for the response" : "Enter to ask · Shift + Enter for a new line"}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Processing" : "Ask"}</span></button></div></form><p className="composer-policy">Answers use authorized source text and bounded business summaries. Open evidence to inspect the original; general semantic entailment is not verified.</p></div>
+      <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><span className="composer-note">{pending ? "Waiting for the response" : "Enter to ask · Shift + Enter for a new line"}</span><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Processing" : "Ask"}</span></button></div></form><p className="composer-policy">Company answers use sources you can access. Open a citation to inspect the original.</p></div>
       </div>
     </div>
   </>;
@@ -1077,7 +1097,7 @@ function SectionTitle({ title, action }: { title: string; action?: React.ReactNo
 function StatusRow({ label, value }: { label: string; value: string }) { const ready = ["connected", "ready", "available"].includes(value); return <div className="connection-row"><span>{label}</span><span className={`connection-state ${ready ? "is-ready" : ""}`}><i />{value.replaceAll("_", " ")}</span></div>; }
 
 function citationNumber(claims: Claim[], id: string) {
-  const ids = [...new Set(claims.flatMap((claim) => claim.citations.map((citation) => citation.citation_id)))];
+  const ids = [...new Set(claims.flatMap((claim) => claim.citations.map(citationKey)))];
   return ids.indexOf(id) + 1;
 }
 function formatLocation(location: Record<string, unknown>) {

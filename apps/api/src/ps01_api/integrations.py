@@ -53,31 +53,40 @@ async def verify_supabase_session(
     return user if isinstance(user, dict) and isinstance(user.get("id"), str) else None
 
 
-async def create_embedding(client: httpx.AsyncClient, settings: Settings, text: str) -> list[float]:
+async def create_embedding(
+    client: httpx.AsyncClient, settings: Settings, text: str, before_attempt=None
+) -> list[float]:
     return await _create_embedding(
         client,
         settings,
         f"task: search result | query: {text}",
+        before_attempt,
     )
 
 
 async def create_document_embedding(
-    client: httpx.AsyncClient, settings: Settings, title: str, text: str
+    client: httpx.AsyncClient, settings: Settings, title: str, text: str, before_attempt=None
 ) -> list[float]:
     return await _create_embedding(
         client,
         settings,
         f"title: {title or 'none'} | text: {text}",
+        before_attempt,
     )
 
 
 def provider_projects(settings):
     """At most two operator-provisioned Gemini projects; same models and space."""
+    if not settings.gemini_api_key or not settings.gemini_api_key.get_secret_value().strip():
+        raise IntegrationFailure("Gemini is not configured", code="provider_invalid_request")
     if settings.gemini_secondary_api_key:
         if (
             not settings.gemini_project_id
             or not settings.gemini_secondary_project_id
-            or settings.gemini_project_id == settings.gemini_secondary_project_id
+            or not settings.gemini_project_id.strip()
+            or not settings.gemini_secondary_project_id.strip()
+            or settings.gemini_project_id.strip() == settings.gemini_secondary_project_id.strip()
+            or not settings.gemini_secondary_api_key.get_secret_value().strip()
             or settings.gemini_api_key == settings.gemini_secondary_api_key
         ):
             raise IntegrationFailure(
@@ -102,33 +111,35 @@ def redundancy_eligible(failure):
         "provider_rate_limited",
         "provider_timeout",
         "provider_unavailable",
-        "provider_authentication_failed",
-        "provider_invalid_model",
     }
 
 
-async def _create_embedding(client, settings, input_text):
+async def _create_embedding(client, settings, input_text, before_attempt=None):
     # One fixed model/dimension pair for both projects. No alternate space or
     # model substitution is permitted against the existing index.
-    if settings.embedding_dimensions != 1536:
+    if (
+        settings.embedding_dimensions != 1536
+        or settings.gemini_embedding_model.removeprefix("models/") != "gemini-embedding-2"
+    ):
         raise IntegrationFailure("Index dimension mismatch", code="provider_invalid_request")
     last_failure = None
     try:
         async with asyncio.timeout(settings.generation_budget_seconds):
             for project in provider_projects(settings):
-                if not project.gemini_api_key:
-                    last_failure = IntegrationFailure(
-                        "Gemini is not configured", code="provider_unavailable"
-                    )
-                    continue
                 model = project.gemini_embedding_model.removeprefix("models/")
                 circuit = _circuit(project, "embedding:" + model)
                 # Serialize requests per project so a failed chunk stops queued
                 # requests before they multiply quota failures. No text cache.
                 async with circuit.lock:
                     if failure := _blocked(circuit):
+                        if not redundancy_eligible(failure):
+                            raise failure
                         last_failure = failure
                         continue
+                    # Run after queued requests/cooldowns and immediately before
+                    # sending private input. Access failures never cool a provider.
+                    if before_attempt:
+                        await before_attempt()
                     try:
                         response = await client.post(
                             f"{GEMINI_API_ROOT}/models/{model}:embedContent",
@@ -136,9 +147,7 @@ async def _create_embedding(client, settings, input_text):
                             json={
                                 "model": f"models/{model}",
                                 "content": {"parts": [{"text": input_text}]},
-                                "embedContentConfig": {
-                                    "outputDimensionality": project.embedding_dimensions
-                                },
+                                "outputDimensionality": project.embedding_dimensions,
                             },
                             timeout=httpx.Timeout(20.0, connect=5.0),
                         )
@@ -162,7 +171,7 @@ async def _create_embedding(client, settings, input_text):
                             raise
                         last_failure = exc
                         continue
-                    except (ValueError, TypeError, AttributeError) as exc:
+                    except (ValueError, TypeError, AttributeError, OverflowError) as exc:
                         raise IntegrationFailure(
                             "Invalid embedding response", code="provider_invalid_response"
                         ) from exc
@@ -301,7 +310,7 @@ async def generation_models(client, settings):
                 for m in response.json()["models"]
                 if "generateContent" in m.get("supportedGenerationMethods", [])
             }
-        except (ValueError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise IntegrationFailure(
                 "Invalid model catalogue", code="provider_invalid_response"
             ) from exc
@@ -331,7 +340,10 @@ def provider_failure(response):
         400: "provider_invalid_request",
         408: "provider_timeout",
         504: "provider_timeout",
-    }.get(response.status_code, "provider_unavailable")
+    }.get(
+        response.status_code,
+        "provider_invalid_request" if 400 <= response.status_code < 500 else "provider_unavailable",
+    )
     failure = IntegrationFailure(f"Gemini request failed (HTTP {response.status_code})", code=code)
     failure.provider_status = response.status_code
     try:
@@ -360,19 +372,24 @@ def model_scoped_quota(response):
         return bool(violations) and all(
             v.get("quotaDimensions", {}).get("model") for v in violations
         )
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, AttributeError):
         return False
 
 
+async def _generation_backoff(attempts):
+    # Share one retry schedule across models and projects. The enclosing total
+    # budget also bounds these waits; never retry the same cooled-down target.
+    sent = sum(attempt.get("attempted") is True for attempt in attempts)
+    await asyncio.sleep(min(4.0, 2.0 ** max(0, sent - 1)))
+
+
 async def generate_claims(client, settings, prompt, before_attempt=None, attempt_observer=None):
-    if not settings.gemini_api_key:
-        raise IntegrationFailure("Gemini is not configured", code="provider_unavailable")
     attempts = []
     try:
         async with asyncio.timeout(settings.generation_budget_seconds):
             projects = provider_projects(settings)
             last_failure = None
-            for project in projects:
+            for project_index, project in enumerate(projects):
                 if not project.gemini_api_key:
                     continue
                 try:
@@ -391,6 +408,8 @@ async def generate_claims(client, settings, prompt, before_attempt=None, attempt
                     if not redundancy_eligible(exc):
                         raise
                     last_failure = exc
+                    if project_index + 1 < len(projects):
+                        await _generation_backoff(attempts)
             raise last_failure or IntegrationFailure(
                 "No eligible project", code="provider_unavailable"
             )
@@ -438,6 +457,8 @@ async def _generate_bounded(
     for index, model in enumerate(models):
         circuit = _circuit(settings, model)
         if failure := _blocked(circuit):
+            if not redundancy_eligible(failure):
+                raise failure
             last_failure = failure
             attempts.append(
                 {
@@ -499,7 +520,7 @@ async def _generate_bounded(
                 attempt["code"] = failure.code
                 last_failure = failure
                 if index + 1 < len(models):
-                    await asyncio.sleep(0.25)
+                    await _generation_backoff(attempts)
                     continue
                 raise failure from exc
             except asyncio.CancelledError:
@@ -526,7 +547,7 @@ async def _generate_bounded(
                 if retryable and index + 1 < len(models):
                     # A different model is a different quota bucket; never retry this
                     # exhausted model before its RetryInfo interval has elapsed.
-                    await asyncio.sleep(0.25)
+                    await _generation_backoff(attempts)
                     continue
                 raise failure
             try:
@@ -541,7 +562,7 @@ async def _generate_bounded(
                 )
                 if not isinstance(output, dict) or not isinstance(output.get("claims"), list):
                     raise ValueError("Invalid claims")
-            except (IndexError, KeyError, TypeError, ValueError) as exc:
+            except (IndexError, KeyError, TypeError, ValueError, AttributeError) as exc:
                 raise IntegrationFailure(
                     "Malformed structured output", code="provider_invalid_response"
                 ) from exc

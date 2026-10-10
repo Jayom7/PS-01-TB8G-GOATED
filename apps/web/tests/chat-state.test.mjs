@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {chatErrorMessage, appendTurn} from '../src/lib/chat-state.ts';
+import {chatErrorMessage, chatFailureTitle, citationKey, groupCitations, appendTurn} from '../src/lib/chat-state.ts';
 
 test('ordinary chat never renders upstream text, model IDs or long retry values', () => {
   for (const code of ['provider_rate_limited', 'provider_unavailable', 'provider_timeout', 'provider_invalid_response']) {
@@ -30,4 +30,17 @@ test('original-source grouping retains distinct OCR citations and never merges d
   const groups = groupCitations([first, second, first, {...first, document_id: 'doc-b'}]);
   assert.equal(groups.length, 2);
   assert.deepEqual(groups[0].citations, [first, second]);
+});
+
+test('permission failures and unusable generation have distinct safe titles', () => {
+  assert.equal(chatFailureTitle({status: 403}), 'Access denied');
+  assert.equal(chatFailureTitle({code: 'provider_invalid_response'}), 'Response validation failed');
+  assert.equal(chatFailureTitle({code: 'provider_timeout'}), 'Generation unavailable');
+  assert.match(chatErrorMessage({code: 'provider_invalid_response'}), /validated.*No answer/);
+});
+test('separate passages in a PDF chunk keep distinct references', () => {
+  const first = {citation_id: 'chunk', evidence_id: 'chunk:0', document_id: 'doc', title: 'Contract', location: {page: 1}};
+  const second = {...first, evidence_id: 'chunk:1'};
+  assert.notEqual(citationKey(first), citationKey(second));
+  assert.equal(groupCitations([first, second, first])[0].citations.length, 2);
 });

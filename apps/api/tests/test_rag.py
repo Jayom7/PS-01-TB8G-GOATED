@@ -40,7 +40,7 @@ def test_paid_paraphrase_cannot_override_unpaid_canonical_evidence():
         {"claims": [{"text": "The invoice is paid.", "evidence_ids": ["invoice:0"]}]},
         context(row()),
     )
-    assert result["state"] == "INSUFFICIENT_EVIDENCE"
+    assert result["state"] == "CITATION_VALIDATION_FAILED"
 
 
 def test_fabricated_second_quote_is_rejected_not_rendered():
@@ -55,7 +55,7 @@ def test_fabricated_second_quote_is_rejected_not_rendered():
         },
         context(row()),
     )
-    assert result["state"] == "INSUFFICIENT_EVIDENCE"
+    assert result["state"] == "CITATION_VALIDATION_FAILED"
 
 
 def test_multiple_sources_are_resolved_independently():
@@ -70,7 +70,8 @@ def test_multiple_sources_are_resolved_independently():
     )
     result = validate_generation(select("invoice:0", "contract:0"), evidence)
     assert result["state"] == "CITATION_VALIDATED"
-    assert len(result["claims"][0]["citations"]) == 2
+    assert len(result["claims"]) == 2
+    assert all(len(claim["citations"]) == 1 for claim in result["claims"])
 
 
 def test_mixed_authorized_and_unauthorized_ids_reject_entire_claim():
@@ -233,7 +234,7 @@ def test_model_cannot_supply_source_metadata():
 
 @pytest.mark.parametrize(
     "other_invoice,expected",
-    [("ACM-INV-2048", "INSUFFICIENT_EVIDENCE"), ("ACM-INV-9999", "CITATION_VALIDATED")],
+    [("ACM-INV-2048", "EVIDENCE_CONFLICT"), ("ACM-INV-9999", "CITATION_VALIDATED")],
 )
 def test_paid_unpaid_conflict_across_modalities_is_invoice_scoped(other_invoice, expected):
     evidence = [
@@ -342,3 +343,34 @@ def test_invoice_identity_links_only_visible_siblings_of_one_document():
     rows[0]["content"] += " and invoice CF-INV-1010"
     _, ambiguous = prepare_generation_context("What is the Acme invoice CF-INV-1009 total?", rows)
     assert validate_generation(select("amount:0"), ambiguous)["claims"] == []
+
+
+def test_typed_project_answer_and_ambiguity_use_actual_fields():
+    from ps01_api.rag import record_clarification
+
+    atlas = row(
+        chunk_id="atlas",
+        row_id="NVC-ENG-ATLAS",
+        metadata={
+            "table": "projects",
+            "fields": {
+                "project_id": "NVC-ENG-ATLAS",
+                "name": "Atlas",
+                "status": "staging validation",
+            },
+        },
+    )
+    other = row(
+        chunk_id="other",
+        row_id="NVC-ENG-OTHER",
+        metadata={
+            "table": "projects",
+            "fields": {"project_id": "NVC-ENG-OTHER", "name": "Other", "status": "planning"},
+        },
+    )
+    _, canonical = prepare_generation_context("What is the Atlas project status?", [atlas, other])
+    assert record_clarification("What is the project status?", canonical)
+    assert record_clarification("What is the Atlas project status?", canonical) is None
+    result = validate_generation(select("atlas:0"), canonical)
+    assert result["claims"][0]["text"] == "Atlas (NVC-ENG-ATLAS) is in staging validation."
+    assert "planning" not in str(result)

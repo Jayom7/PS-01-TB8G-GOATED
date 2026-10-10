@@ -403,3 +403,162 @@ async def test_typed_referent_does_not_expand_to_other_invoices_in_shared_docume
         current = await main._recent_referents(None, None, "current-token", saved)
     assert current == [row]
     rest.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Hi, what is the scanned invoice INV-1001 total?",
+        "Good morning! whats the scanned invocie INV-1001 ammount?",
+        "Thanks, how much is the scanned invoice INV-1001 total?",
+    ],
+)
+def test_mixed_social_question_retrieves_business_intent(question):
+    generator = AsyncMock(side_effect=IntegrationFailure("outage", code="provider_timeout"))
+    with (
+        query_patches([SCAN], generator),
+        patch("ps01_api.main.create_embedding", AsyncMock(return_value=[0] * 1536)) as embed,
+    ):
+        response = TestClient(app).post(
+            "/api/v1/chat/query", headers=HEADERS, json={"query": question}
+        )
+    body = response.json()
+    assert body["state"] == "VERIFIED_EVIDENCE"
+    assert body["claims"][0]["text"] == "Invoice INV-1001 totals USD 100.00."
+    assert "INV-1001" in embed.await_args.args[2]
+    assert not embed.await_args.args[2].lower().startswith(("hi", "good morning", "thanks"))
+
+
+def dated_invoice():
+    return {
+        "chunk_id": ID,
+        "source_type": "structured",
+        "source_name": "Invoice",
+        "row_id": "INV-1001",
+        "content": "Stale text must not be used.",
+        "metadata": {
+            "table": "invoices",
+            "fields": {
+                "invoice_id": "INV-1001",
+                "customer": "Acme",
+                "currency": "USD",
+                "total_minor_units": 10000,
+                "payment_status": "unpaid",
+                "due_date": "2026-10-01",
+                "status_as_of": "2026-10-08",
+                "invoice_date": "2026-09-01",
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("When is invoice INV-1001 due?", "Invoice INV-1001 is due on 2026-10-01."),
+        ("What is invoice INV-1001 invoice date?", "Invoice INV-1001 is dated 2026-09-01."),
+        ("Is invoice INV-1001 paid?", "Invoice INV-1001 was unpaid as of 2026-10-08."),
+    ],
+)
+def test_dated_fallback_is_question_specific_and_canonically_cited(query, expected):
+    result = extract(query, [dated_invoice()])
+    assert result["state"] == "VERIFIED_EVIDENCE"
+    assert result["claims"][0]["text"] == expected
+    assert "Stale text" not in str(result)
+    assert result["claims"][0]["citations"][0]["location"] == {
+        "table": "invoices",
+        "row": "INV-1001",
+    }
+
+
+@pytest.mark.parametrize(
+    "query", ["What about the due date?", "When is it due?", "And the amount?"]
+)
+def test_implicit_fact_followup_requires_one_current_referent(query):
+    from ps01_api.rag import interpret_followup
+
+    effective, clarification = interpret_followup(query, [SCAN])
+    assert "INV-1001" in effective and clarification is None
+    assert (
+        interpret_followup(query, [])[1]
+        == "Which invoice do you mean? Please include its invoice ID."
+    )
+    assert interpret_followup(query, [SCAN, {"content": "Invoice INV-9999"}])[1]
+
+
+def test_due_date_followup_retrieves_again_and_ignores_saved_fact():
+    saved = [
+        {
+            "response": {
+                "claims": [{"text": "Due date: 2099-01-01", "citations": [{"citation_id": ID}]}]
+            }
+        }
+    ]
+    generator = AsyncMock(side_effect=IntegrationFailure("outage", code="provider_timeout"))
+    with (
+        query_patches([dated_invoice()], generator),
+        patch("ps01_api.main._history_rows", AsyncMock(return_value=saved)),
+        patch(
+            "ps01_api.main._rest_rows",
+            AsyncMock(
+                return_value=__import__("httpx").Response(
+                    200, json=[{"id": ID, "row_id": "INV-1001", "content": "Invoice INV-1001"}]
+                )
+            ),
+        ) as rest,
+        patch("ps01_api.main.create_embedding", AsyncMock(return_value=[0] * 1536)) as embed,
+    ):
+        response = TestClient(app).post(
+            "/api/v1/chat/query",
+            headers=HEADERS,
+            json={
+                "query": "What about the due date?",
+                "conversation_id": ID,
+            },
+        )
+    assert response.json()["state"] == "VERIFIED_EVIDENCE"
+    assert "2026-10-01" in response.json()["claims"][0]["text"]
+    assert "2099" not in response.text
+    assert "INV-1001" in embed.await_args.args[2]
+    assert rest.await_args.args[2] == "actor-token"
+
+
+def test_invalid_selected_id_is_validation_failure_not_insufficient_evidence():
+    generator = AsyncMock(
+        return_value={"claims": [{"evidence_ids": ["forged:0"]}], "_model": "configured"}
+    )
+    with query_patches([SCAN], generator):
+        response = TestClient(app).post(
+            "/api/v1/chat/query", headers=HEADERS, json={"query": QUERY}
+        )
+    assert response.json()["state"] == "CITATION_VALIDATION_FAILED"
+    assert response.json()["claims"] == []
+    assert "Invoice INV-1001 totals" not in response.text
+
+
+@pytest.mark.parametrize("question", ["hi there whats up", "What's up?", "got it", "Goodbye"])
+def test_ordinary_small_talk_never_embeds_or_generates(question):
+    generator = AsyncMock()
+    with (
+        query_patches([], generator),
+        patch("ps01_api.main.create_embedding", AsyncMock()) as embed,
+    ):
+        response = TestClient(app).post(
+            "/api/v1/chat/query", headers=HEADERS, json={"query": question}
+        )
+    assert response.json()["state"] == "SMALL_TALK"
+    embed.assert_not_awaited()
+    generator.assert_not_awaited()
+
+
+def test_contradiction_abstains_before_provider_without_source_disclosure():
+    generator = AsyncMock()
+    conflict = {**SCAN, "chunk_id": SECOND, "content": "Invoice INV-1001. Invoice total USD 200.00"}
+    with query_patches([SCAN, conflict], generator):
+        response = TestClient(app).post(
+            "/api/v1/chat/query", headers=HEADERS, json={"query": QUERY}
+        )
+    assert response.json()["state"] == "EVIDENCE_CONFLICT"
+    assert response.json()["claims"] == []
+    assert "invoice.png" not in response.text and "USD 200" not in response.text
+    generator.assert_not_awaited()

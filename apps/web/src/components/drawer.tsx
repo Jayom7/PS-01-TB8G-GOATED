@@ -20,9 +20,15 @@ export function Drawer({ title, description, onClose, children, variant = "dialo
     const dismiss = (event: KeyboardEvent) => {
       if (variant === "evidence" && event.key === "Escape" && !document.querySelector("dialog:modal")) closeRef.current();
     };
+    const outside = (event: PointerEvent) => {
+      if (variant !== "evidence" || document.querySelector("dialog:modal")) return;
+      if (event.target instanceof Node && !dialog?.contains(event.target)) closeRef.current();
+    };
     document.addEventListener("keydown", dismiss);
+    document.addEventListener("pointerdown", outside);
     return () => {
       document.removeEventListener("keydown", dismiss);
+      document.removeEventListener("pointerdown", outside);
       dialog?.close();
       document.body.style.overflow = previousOverflow;
       if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();

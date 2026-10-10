@@ -1,4 +1,4 @@
-import { getSupabaseConfig } from "@/lib/supabase/env";
+import { getSupabaseConfig, SupabaseConfigurationError } from "@/lib/supabase/env";
 
 export async function GET() {
   try {
@@ -9,7 +9,10 @@ export async function GET() {
     if (!response.ok) throw new Error("Auth unavailable");
     const settings = await response.json();
     return Response.json({ google: settings.external?.google === true }, {headers: {"Cache-Control": "no-store"}});
-  } catch {
-    return Response.json({ google: false, unavailable: true }, { status: 503 });
+  } catch (error) {
+    return Response.json(
+      { google: false, unavailable: true, configuration_error: error instanceof SupabaseConfigurationError },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
   }
 }

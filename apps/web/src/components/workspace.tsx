@@ -163,7 +163,7 @@ function starterQuestions(sources: Source[]) {
   if (hasSource(/sales\.json/)) questions.push({ label: "Sales pipeline", question: "What stage is Acme's sales opportunity in?", icon: "table" });
   return questions.slice(0, 4);
 }
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
 
 async function readResponse<T>(response: Response, operation?: "ingestion"): Promise<T> {
   const body = await response.json().catch(() => null);
@@ -1099,7 +1099,7 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
   }
   return <div className="data-page"><PageHeading title="Bring knowledge into focus." description="Add an original file or a business record. Publish it to the right access context." />
     {role === "Loading" && <div className="inline-notice" role="status"><span className="loading-dot" /><span>Checking ingestion service availability…</span></div>}
-    {!available && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>The local ingestion service is unavailable. Confirm the local API and Supabase are running.</span></div>}
+    {!available && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>Ingestion is unavailable. Ask your workspace administrator to check the service configuration.</span></div>}
     {available && role !== "CEO" && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>Ingestion is restricted to the CEO demo account. Your current role remains read-only.</span></div>}
     {error && <p className="request-error" role="alert">{error}</p>}
     <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div><IngestionFeedback status={fileStatus} />
@@ -1107,7 +1107,7 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
       {file && <button className="text-button" type="button" disabled={fileStatus.pending} onClick={() => setFile(null)}>Remove selected file</button>}{fileError && <p className="request-error" role="alert">{fileError}</p>}
       <label className="field-label">Grant source to<select value={accessRole} disabled={!canIngest || fileStatus.pending} onChange={(event) => setAccessRole(event.target.value)}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
       <button className="primary-action" type="submit" disabled={!canIngest || fileStatus.pending || !file}>{fileStatus.pending ? "Uploading and indexing…" : "Upload and index"}</button>
-      <p className="form-footnote">Files are stored in the local private ingestion folder. Access is granted to the selected role and the CEO.</p>
+      <p className="form-footnote">Original files remain private. Access is granted to the selected role and the CEO.</p>
     </form>
     <form className="ingest-form" onSubmit={onStructured}><div className="form-title"><Icon name="table" size={18} /><div><h2>Structured record</h2><p>Save a relational row and index its authorized representation.</p></div></div><IngestionFeedback status={structuredStatus} />
       <div className="field-pair"><label className="field-label">Table<select value={structuredMeta.table} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ table: event.target.value })} required>{["invoices", "customers", "payments", "purchase_orders", "projects", "employees", "opportunities"].map((table) => <option key={table}>{table}</option>)}</select></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>

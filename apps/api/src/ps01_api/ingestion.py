@@ -338,6 +338,12 @@ def _check_file_size(path: Path) -> None:
 
 
 def _create_ocr_engine() -> Any:
+    from .config import get_settings
+
+    if get_settings().ocr_engine == "tesseract":
+        from .tesseract_ocr import TesseractOCR
+
+        return TesseractOCR()
     try:
         from paddleocr import PaddleOCR
     except ImportError as exc:

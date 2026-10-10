@@ -98,7 +98,7 @@ def test_unauthorized_delete_rejects_before_source_lookup():
 
     for detail in ("known", "missing"):
         with patch(
-            "ps01_api.main.require_local_ceo",
+            "ps01_api.main._require_ceo",
             AsyncMock(side_effect=HTTPException(403, "CEO role required")),
         ) as guard:
             response = TestClient(app).delete(
@@ -170,7 +170,9 @@ async def test_ingestion_embedding_quota_preserves_cause_and_compensates():
     with patch("ps01_api.main.create_document_embedding", AsyncMock(side_effect=failure)):
         with pytest.raises(IntegrationFailure) as error:
             await _store_ingested(
-                client, config, ACTOR, "source", "test.pdf", "pdf", "hash", [candidate], "CEO", None
+                client, config, ACTOR, "source", "test.pdf", "pdf", "hash", [candidate],
+                "CEO", None,
+                "actor-token",
             )
     client.delete.assert_awaited_once()
     response = await integration_failure_handler(None, error.value)

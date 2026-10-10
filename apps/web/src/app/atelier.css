@@ -77,7 +77,7 @@ summary { cursor: pointer; }
 .answer-copy > p { font-size: 15px; line-height: 1.75; white-space: pre-wrap; }
 .answer-state { width: fit-content; font: 11px/1.4 var(--font-ui); padding: 5px 8px; border-radius: 4px; color: var(--success); background: var(--success-surface); }
 .answer-state.state-verified_evidence, .answer-state.state-partially_citation_validated { color: var(--evidence); background: var(--warning-surface); }
-.inline-citation { color: var(--accent); border-color: var(--line-strong); background: var(--selected); }
+.inline-citation { color: var(--evidence); border-color: var(--line-strong); background: var(--warning-surface); }
 .answer-sources { display: flex; flex-wrap: wrap; align-items: start; gap: 8px; max-height: 180px; padding: 3px; }
 .answer-sources .inline-citation { min-height: 32px; padding: 5px 9px; margin: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .citation-group summary { padding: 6px; color: var(--evidence); }

@@ -39,6 +39,8 @@ from .integrations import (
     retrieve_chunks,
     verify_supabase_session,
 )
+from .originals import PREFIX as STORAGE_PREFIX
+from .originals import delete_original, read_original, upload_original
 from .rag import (
     citation_from_row,
     insufficient_evidence,
@@ -62,6 +64,7 @@ EVALUATION_RESULTS = REPOSITORY_ROOT / "data" / "local" / "evaluation.json"
 SECURITY_CHECK_LOCK = asyncio.Lock()
 EVALUATION_LOCK = asyncio.Lock()
 PRIVATE_INGESTION = REPOSITORY_ROOT / "data" / "private" / "ingest"
+INGESTION_LOCK = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -229,6 +232,14 @@ def _local_demo_enabled() -> bool:
     settings = get_settings()
     hostname = urlparse(settings.supabase_url or "").hostname
     return hostname in {"localhost", "127.0.0.1", "::1"} and DEMO_CREDENTIALS.is_file()
+
+
+def _ingestion_enabled() -> bool:
+    settings = get_settings()
+    return bool(settings.supabase_secret_key) and (
+        _local_demo_enabled()
+        or (settings.ingestion_enabled and settings.original_storage == "supabase")
+    )
 
 
 def _rest_headers(settings, token: str) -> dict[str, str]:
@@ -578,8 +589,8 @@ async def workspace_summary(
         ),
         "provider_check": getattr(app.state, "provider_status", None),
         "ingestion": "ready"
-        if _local_demo_enabled() and settings.supabase_secret_key
-        else "local admin key unavailable",
+        if _ingestion_enabled()
+        else "administrative ingestion unavailable",
         "evaluation": "available" if _local_demo_enabled() else "local demo unavailable",
         "latest_evaluation_status": latest_evaluation_status,
         "demo_switch_available": _local_demo_enabled() and identity["role"] == "CEO",
@@ -812,14 +823,18 @@ class DemoSwitchRequest(BaseModel):
 async def require_local_ceo(
     client: httpx.AsyncClient, authorization: str | None, demo_role: str | None = None
 ) -> tuple[str, dict[str, object]]:
+    return await _require_ceo(client, authorization, demo_role, local_only=True)
+
+
+async def _require_ceo(client, authorization, demo_role, *, local_only=False):
     settings = get_settings()
-    if not _local_demo_enabled() or not settings.supabase_secret_key:
-        raise HTTPException(status_code=404, detail="Local demo administration is unavailable")
+    if not _ingestion_enabled() or (local_only and not _local_demo_enabled()):
+        raise HTTPException(status_code=404, detail="Administration is unavailable")
     token = await require_session(client, authorization)
     identity = await _identity(client, settings, token)
     _, active_role = await _context_token(client, settings, token, identity, demo_role)
     if identity["role"] != "CEO" or active_role != "CEO":
-        raise HTTPException(status_code=403, detail="CEO role required for this local demo action")
+        raise HTTPException(status_code=403, detail="CEO role required for this action")
     return token, identity
 
 
@@ -885,7 +900,7 @@ async def _store_ingested(
         "storage_path": storage_path,
         "content_hash": content_hash,
         "metadata": {
-            "ingestion": "local-demo",
+            "ingestion": "local-demo" if _local_demo_enabled() else "hosted",
             "chunk_count": len(candidates),
             **({"table": candidates[0].metadata["table"]} if source_type == "structured" else {}),
         },
@@ -1115,11 +1130,22 @@ async def ingest_file(
     access_role: str = Header(default="CEO", alias="X-Access-Role"),
     demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
+    # Reject a second upload before buffering its body. One worker/one active
+    # parser prevents concurrent OCR processes exhausting the free instance.
+    if INGESTION_LOCK.locked():
+        raise HTTPException(
+            status_code=409, detail="Another source is being processed. Retry shortly."
+        )
+    async with INGESTION_LOCK:
+        return await _ingest_file(request, authorization, source_name, access_role, demo_role)
+
+
+async def _ingest_file(request, authorization, source_name, access_role, demo_role):
     settings = get_settings()
-    if not _local_demo_enabled() or not settings.supabase_secret_key:
-        raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
+    if not _ingestion_enabled():
+        raise HTTPException(status_code=404, detail="Ingestion is unavailable")
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as auth_client:
-        actor_token, identity = await require_local_ceo(auth_client, authorization, demo_role)
+        actor_token, identity = await _require_ceo(auth_client, authorization, demo_role)
     raw_name = unquote(source_name)
     safe_name = Path(raw_name.replace("\\", "/")).name
     if (
@@ -1144,6 +1170,8 @@ async def ingest_file(
     stored_path = PRIVATE_INGESTION / f"{source_id}{suffix}"
     stored_path.write_bytes(data)
     stored_path.chmod(0o600)
+    remote_path = None
+    published = False
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
             try:
@@ -1160,6 +1188,11 @@ async def ingest_file(
                 raise HTTPException(
                     status_code=422, detail="No searchable text was found in this source"
                 )
+            if settings.original_storage == "supabase":
+                remote_path = await upload_original(
+                    client, settings, str(identity["organization_id"]),
+                    source_id, suffix, bytes(data)
+                )
             result = await _store_ingested(
                 client,
                 settings,
@@ -1170,9 +1203,10 @@ async def ingest_file(
                 hashlib.sha256(data).hexdigest(),
                 candidates,
                 access_role,
-                str(stored_path.relative_to(REPOSITORY_ROOT)),
+                remote_path or str(stored_path.relative_to(REPOSITORY_ROOT)),
                 actor_token,
             )
+            published = True
     except HTTPException:
         stored_path.unlink(missing_ok=True)
         raise
@@ -1182,6 +1216,20 @@ async def ingest_file(
     except httpx.HTTPError as exc:
         stored_path.unlink(missing_ok=True)
         raise HTTPException(status_code=503, detail="Ingestion service is unavailable") from exc
+    finally:
+        if settings.original_storage == "supabase":
+            stored_path.unlink(missing_ok=True)
+        if remote_path and not published:
+            async with request_client() as cleanup_client:
+                # Persist cleanup intent before attempting removal. It survives
+                # a failed delete and is retried on startup by the existing drain.
+                key = settings.supabase_secret_key.get_secret_value()
+                await cleanup_client.post(
+                    f"{settings.supabase_url.rstrip('/')}/rest/v1/source_cleanup_jobs",
+                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                    json={"source_id": source_id, "storage_path": remote_path},
+                )
+                await cleanup_source_original(cleanup_client, settings, source_id, remote_path)
     return {"state": "indexed", **result}
 
 
@@ -1192,8 +1240,8 @@ async def ingest_structured(
     demo_role: str | None = Header(default=None, alias="X-Demo-Role"),
 ) -> dict[str, object]:
     settings = get_settings()
-    if not _local_demo_enabled() or not settings.supabase_secret_key:
-        raise HTTPException(status_code=404, detail="Local ingestion is unavailable")
+    if not _ingestion_enabled():
+        raise HTTPException(status_code=404, detail="Ingestion is unavailable")
     source_id = str(uuid4())
     try:
         validate_record(request.table, request.row_id, request.fields)
@@ -1207,7 +1255,7 @@ async def ingest_structured(
     except IngestionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
-        actor_token, identity = await require_local_ceo(client, authorization, demo_role)
+        actor_token, identity = await _require_ceo(client, authorization, demo_role)
         result = await _store_ingested(
             client,
             settings,
@@ -1810,7 +1858,10 @@ async def audit_workspace_actions(request: Request, call_next):
 
 
 async def cleanup_source_original(client, settings, source_id, storage_path):
-    if storage_path:
+    if storage_path and storage_path.startswith(STORAGE_PREFIX):
+        if not await delete_original(client, settings, storage_path, source_id):
+            return False
+    elif storage_path:
         path = (REPOSITORY_ROOT / storage_path).resolve()
         # Immutable synthetic seed fixtures are retained; uploads are private and disposable.
         if path.is_relative_to(PRIVATE_INGESTION.resolve()):
@@ -1830,7 +1881,7 @@ async def cleanup_source_original(client, settings, source_id, storage_path):
 
 async def drain_cleanup_jobs():
     settings = get_settings()
-    if not _local_demo_enabled() or not settings.supabase_secret_key:
+    if not _ingestion_enabled():
         return
     key = settings.supabase_secret_key.get_secret_value()
     try:
@@ -1857,7 +1908,7 @@ async def delete_source(
 ):
     settings = get_settings()
     async with request_client() as client:
-        _, identity = await require_local_ceo(client, authorization, demo_role)
+        _, identity = await _require_ceo(client, authorization, demo_role)
         key = settings.supabase_secret_key.get_secret_value()
         response = await client.post(
             f"{settings.supabase_url.rstrip('/')}/rest/v1/rpc/delete_local_source",
@@ -2007,8 +2058,6 @@ async def source_original(
     # A whole file requires a document-level grant. A chunk-only grant cannot
     # expose siblings, and structured fixtures are never returned as originals.
     settings = get_settings()
-    if not _local_demo_enabled():
-        raise HTTPException(status_code=404, detail="Source not found")
     async with request_client() as client:
         actor_token = bearer_token(authorization)
         identity = await _identity(client, settings, actor_token)
@@ -2020,7 +2069,7 @@ async def source_original(
             "documents",
             params={
                 "id": f"eq.{source_id}",
-                "select": "id,source_type,storage_path,metadata",
+                "select": "id,organization_id,source_type,storage_path,metadata",
                 "limit": "1",
             },
         )
@@ -2028,6 +2077,26 @@ async def source_original(
     if not rows or rows[0]["source_type"] not in {"pdf", "image_ocr"}:
         raise HTTPException(status_code=404, detail="Source not found")
     doc = rows[0]
+    if str(doc.get("storage_path", "")).startswith(STORAGE_PREFIX):
+        async with request_client() as client:
+            data, suffix = await read_original(client, settings, doc)
+        if page is not None:
+            if doc["source_type"] != "pdf":
+                raise HTTPException(status_code=404, detail="Page not found")
+            with tempfile.TemporaryDirectory() as directory:
+                temporary = Path(directory) / "original.pdf"
+                temporary.write_bytes(data)
+                data = await asyncio.to_thread(render_pdf_page, temporary, page)
+            media = "image/png"
+        else:
+            media = "application/pdf" if suffix == ".pdf" else (
+                "image/png" if suffix == ".png" else "image/jpeg"
+            )
+        return Response(data, media_type=media, headers={
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"
+        })
+    if not _local_demo_enabled():
+        raise HTTPException(status_code=404, detail="Source not found")
     path = original_path(doc)
     if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="Source not found")

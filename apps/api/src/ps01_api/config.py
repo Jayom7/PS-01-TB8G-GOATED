@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,9 @@ class Settings(BaseSettings):
     gemini_chat_model: str = "gemini-3.8-flash"
     gemini_fallback_chat_model: str = "gemini-3.7-flash"
     generation_budget_seconds: float = Field(default=45, ge=1, le=60)
+    ingestion_enabled: bool = False
+    original_storage: Literal["local", "supabase"] = "local"
+    ocr_engine: Literal["paddleocr", "tesseract"] = "paddleocr"
 
 
 @lru_cache

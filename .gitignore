@@ -22,3 +22,4 @@ data/private/
 data/local/
 *.log
 .pnpm-store/
+:memory:.ses

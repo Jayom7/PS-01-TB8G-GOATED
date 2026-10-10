@@ -251,7 +251,7 @@ class TestApiSecurity:
         with (
             patch("ps01_api.main._local_demo_enabled", return_value=True),
             patch(
-                "ps01_api.main.require_local_ceo",
+                "ps01_api.main._require_ceo",
                 new_callable=AsyncMock,
                 return_value=("token", {}),
             ),

@@ -1,36 +1,36 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Clearframe web
 
-## Getting Started
+Next.js frontend for the Clearframe knowledge workspace. It requires Supabase
+Auth, a migrated/seeded database and the FastAPI service; starting `next dev`
+alone does not create a working demo.
 
-First, run the development server:
+For complete **Windows/WSL2 and macOS setup**, follow the
+[root README](../../README.md). All commands below run from the repository root.
+
+After installing prerequisites/dependencies and configuring your private Gemini
+key, start the complete local stack once with:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+./scripts/dev --seed
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+After successful seeding, use `./scripts/dev` for later launches. Open
+`http://localhost:3000/login` and sign in using the CEO entry in the ignored
+`.local-demo-credentials.json` generated on your own computer.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The launcher writes ignored `apps/web/.env.local` with the local Supabase public
+settings and a same-origin API proxy to `127.0.0.1:8000`. Do not put Gemini or
+Supabase service keys in frontend variables. The launcher replaces this local
+environment file; keep hosted configuration in a separate checkout/environment.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Frontend checks
 
-## Learn More
+```bash
+pnpm --dir apps/web lint
+apps/web/node_modules/.bin/tsc --noEmit --incremental false -p apps/web/tsconfig.json
+pnpm --dir apps/web build
+```
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The frontend uses pnpm 11.25.0 and its checked-in lockfile. A successful build
+alone does not verify live Auth, RLS, OCR, ingestion or Gemini answers. Hosted
+provisioning and deployment are separate from the local startup flow.

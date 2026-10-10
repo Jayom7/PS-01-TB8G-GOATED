@@ -1,16 +1,24 @@
 # NovaCore synthetic corpus
 
 This directory contains generated, fictional demo content only. The retrieval
-manifest indexes six sources: two PDFs, two OCR images, and two structured
-records. It retains an Acme contract, a prompt-injection test, an invoice scan,
-an HR acknowledgement, and finance and engineering records. The invoice is
+manifest indexes 19 sources: eight PDFs, four OCR images and seven structured
+sources. It includes contracts, policies, a prompt-injection test, invoice and
+receipt scans, an HR acknowledgement, a purchase order and typed business
+records. The invoice is
 USD 48,000, dated 2026-09-01, due 2026-10-01, and unpaid as of 2026-10-08.
 
-Regenerate the corpus with:
+The checked-in manifest and all referenced files are included in the clone.
+Use the [root README](../../README.md) to install and run on Windows/WSL2 or
+macOS; normal setup does not require regenerating the corpus.
+
+For development only, the generator is:
 
 ```sh
 .venv/bin/python apps/api/scripts/generate_demo_corpus.py
 ```
+
+Regeneration changes synthetic fixture files and may alter the demo snapshot;
+do not use it as a routine startup or troubleshooting step.
 
 `manifest.json` describes role access. It does not itself create users or
 database records. To seed the local Supabase stack and generate local-only

@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { Icon } from "@/components/icons";
 import { AuthFrame } from "@/components/auth-frame";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
@@ -70,13 +71,13 @@ function LoginForm() {
   return (
     <AuthFrame>
       <section className="login-content" aria-labelledby="login-title">
-        <Link className="brand-name login-brand" href="/" aria-label="Clearframe home">Clearframe</Link>
+        <Link className="brand-name login-brand" href="/" aria-label="Clearframe home"><span className="brand-mark"><Icon name="lock" size={17} /></span>Clearframe</Link>
         <h1 id="login-title">Sign in to your workspace</h1>
         <p className="login-intro">Use your organization account to access authorized knowledge.</p>
         {notice && <p className="auth-message" role="status">{notice}</p>}
-        <button className="oauth-button" type="button" disabled={!google || busy} onClick={() => void signInGoogle()}>{google === null ? "Checking Google sign-in…" : "Continue with Google"}</button>
+        {google && <button className="oauth-button" type="button" disabled={busy} onClick={() => void signInGoogle()}>Continue with Google</button>}
         {google === false && <p className="auth-configuration">{configurationError ? "Workspace sign-in is not configured. Contact your workspace administrator." : googleUnavailable ? "Sign-in service is unavailable. Check the Supabase service and connection, then reload this page." : "Google sign-in is not configured for this workspace. Use email and password."}</p>}
-        <div className="auth-divider">or use email</div>
+        {google && <div className="auth-divider">or use email</div>}
         <form className="login-form" onSubmit={signIn}>
           <label htmlFor="email">Email</label>
           <input

@@ -2,9 +2,12 @@ import type { ReactNode, SVGProps } from "react";
 
 export type IconName =
   | "chat" | "files" | "table" | "upload" | "chart" | "send" | "paperclip"
-  | "chevron" | "menu" | "close" | "user" | "arrow" | "lock" | "home" | "search";
+  | "sun" | "moon" | "trash" | "chevron" | "menu" | "close" | "user" | "arrow" | "lock" | "home" | "search";
 
 const paths: Record<IconName, ReactNode> = {
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></>,
+  moon: <path d="M20.5 14a8.5 8.5 0 0 1-10.5-10.5A8.5 8.5 0 1 0 20.5 14Z" />,
+  trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></>,
   chat: <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 2v-5.5A7.5 7.5 0 1 1 20 11.5Z" />,
   files: <><path d="M7 3.75h7l4.25 4.5v12A1.75 1.75 0 0 1 16.5 22h-9A1.75 1.75 0 0 1 5.75 20.25v-14A2.5 2.5 0 0 1 8.25 3.75Z" /><path d="M14 4v5h4M9 13h6M9 17h6" /></>,
   table: <><rect x="3.5" y="4.5" width="17" height="15" rx="1.5" /><path d="M3.5 10h17M9 4.5v15m6-15v15" /></>,

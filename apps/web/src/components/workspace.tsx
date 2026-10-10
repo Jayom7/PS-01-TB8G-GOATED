@@ -70,7 +70,8 @@ type Identity = {
 };
 
 function readTheme(): "light" | "dark" {
-  return window.localStorage.getItem("clearframe-theme") === "dark" ? "dark" : "light";
+  try { return window.localStorage.getItem("clearframe-theme") === "dark" ? "dark" : "light"; }
+  catch { return document.documentElement.dataset.theme === "dark" ? "dark" : "light"; }
 }
 
 function subscribeTheme(callback: () => void) {
@@ -136,6 +137,7 @@ const DEMO_ROLES = ["CEO", "Finance Manager", "HR Manager", "Sales Manager", "En
 const navigation: { label: View; icon: IconName }[] = [
   { label: "Dashboard", icon: "home" },
   { label: "Ask", icon: "chat" },
+  { label: "History", icon: "chat" },
   { label: "Sources", icon: "files" },
   { label: "Ingest", icon: "upload" },
   { label: "Security", icon: "lock" },
@@ -250,7 +252,6 @@ export default function Workspace({ identity, view, savedConversation }: { ident
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [turns, setTurns] = useState<{ query: string; response: QueryResult }[]>([]);
   const [conversations, setConversations] = useState<{ id: string; title: string; updated_at: string }[]>([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(view === "History");
   const [askFailure, setAskFailure] = useState("Answer unavailable");
   const [retryEvidence, setRetryEvidence] = useState<Citation[]>([]);
@@ -310,8 +311,8 @@ export default function Workspace({ identity, view, savedConversation }: { ident
     return () => window.clearTimeout(timer);
   }, [refreshWorkspace]);
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    document.documentElement.dataset.theme = readTheme();
+  }, []);
   useEffect(() => { activeRoleRef.current = activeRole; }, [activeRole]);
   useEffect(() => () => { askController.current?.abort(); }, []);
   async function ask(event?: FormEvent<HTMLFormElement>, retryQuestion?: string) {
@@ -529,11 +530,9 @@ export default function Workspace({ identity, view, savedConversation }: { ident
       setResult(last?.response ?? null);
       setAskedQuery(last?.query ?? "");
       setQuery("");
-      setHistoryOpen(false);
     } catch (cause) {
       if (activeRoleRef.current === activeRole) {
         setHistoryError(networkMessage(cause, "This conversation is unavailable in your current access context."));
-        setHistoryOpen(true);
       }
     }
     finally { askInFlight.current = false; setPending(false); }
@@ -571,7 +570,7 @@ export default function Workspace({ identity, view, savedConversation }: { ident
     closeSource();
     setTraceOpen(false);
     setConversationId(null); setTurns([]); setResult(null); setAskedQuery(""); setQuery(""); setError(null);
-    setRetryEvidence([]); setHistoryError(null); setHistoryOpen(false);
+    setRetryEvidence([]); setHistoryError(null);
     document.getElementById("query-input")?.focus();
   }
 
@@ -804,11 +803,15 @@ export default function Workspace({ identity, view, savedConversation }: { ident
     const trigger = document.activeElement;
     const rail = navigationRef.current;
     const content = document.querySelector<HTMLElement>(".main-column");
-    const header = document.querySelector<HTMLElement>(".topbar");
     if (content) content.inert = true;
-    if (header) header.inert = true;
-    const focusable = () => Array.from(rail?.querySelectorAll<HTMLElement>('a, button:not(:disabled), summary, select:not(:disabled)') ?? []).filter((element) => element.getClientRects().length > 0);
-    focusable()[0]?.focus();
+    const focusable = () => [
+      ...Array.from(document.querySelectorAll<HTMLElement>('.header-actions button')),
+      ...Array.from(rail?.querySelectorAll<HTMLElement>('a, button:not(:disabled), summary, select:not(:disabled)') ?? []),
+    ].filter((element) => element.getClientRects().length > 0 && !element.closest('details:not([open]) .account-popover'));
+    const desktop = window.matchMedia("(min-width: 701px)");
+    const onDesktop = () => { if (desktop.matches) setNavigationOpen(false); };
+    desktop.addEventListener("change", onDesktop);
+    rail?.querySelector<HTMLElement>("a")?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") { event.preventDefault(); setNavigationOpen(false); }
       if (event.key === "Tab") {
@@ -818,13 +821,13 @@ export default function Workspace({ identity, view, savedConversation }: { ident
       }
     };
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("keydown", onKey); if (content) content.inert = false; if (header) header.inert = false; if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus(); };
+    return () => { document.removeEventListener("keydown", onKey); if (content) content.inert = false; desktop.removeEventListener("change", onDesktop); if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus(); };
   }, [navigationOpen]);
 
   function setSelectedTheme(next: "light" | "dark") {
     setAccountOpen(false);
     document.documentElement.dataset.theme = next;
-    window.localStorage.setItem("clearframe-theme", next);
+    try { window.localStorage.setItem("clearframe-theme", next); } catch { /* The current page still switches when storage is blocked. */ }
     window.dispatchEvent(new Event("clearframe-theme-change"));
   }
 
@@ -833,28 +836,29 @@ export default function Workspace({ identity, view, savedConversation }: { ident
     <main className={`app-shell ${sourceOpen ? "has-evidence" : ""}`}>
       <header className="topbar">
         <div className="brand-lockup">
-          <button className="icon-button mobile-menu-button" type="button" aria-label={navigationOpen ? "Close navigation" : "Open navigation"} aria-expanded={navigationOpen} onClick={() => { if (!navigationOpen) closeSource(); setNavigationOpen((open) => !open); }}>
-            <Icon name={navigationOpen ? "close" : "menu"} size={21} />
-          </button>
           <span className="brand-mark" aria-hidden="true"><Icon name="lock" size={17} /></span><span className="brand-name">Clearframe</span>
         </div>
         <div className="topbar-context"><span>Workspace</span><span className="context-separator" aria-hidden="true">/</span><strong>{view === "Dashboard" ? "Overview" : view}</strong></div>
+        <div className="header-actions">
+          <button className="icon-button" type="button" aria-label={theme === "light" ? "Use dark theme" : "Use light theme"} title={theme === "light" ? "Use dark theme" : "Use light theme"} onClick={() => setSelectedTheme(theme === "light" ? "dark" : "light")}><Icon name={theme === "light" ? "moon" : "sun"} size={19} /></button>
+          <button className="icon-button mobile-menu-button" type="button" aria-label={navigationOpen ? "Close navigation" : "Open navigation"} aria-expanded={navigationOpen} aria-controls="workspace-navigation" onClick={() => { if (!navigationOpen) closeSource(); setNavigationOpen((open) => !open); }}>
+            <Icon name={navigationOpen ? "close" : "menu"} size={21} />
+          </button>
+        </div>
       </header>
 
       <div className="workspace-grid">
-        <aside ref={navigationRef} role={navigationOpen ? "dialog" : undefined} aria-modal={navigationOpen || undefined} aria-label={navigationOpen ? "Workspace navigation" : undefined} className={`navigation-rail ${navigationOpen ? "navigation-open" : ""}`}>
-          <button className="icon-button mobile-nav-close" type="button" aria-label="Close navigation drawer" onClick={() => setNavigationOpen(false)}><Icon name="close" /></button>
+        <aside ref={navigationRef} id="workspace-navigation" aria-label="Workspace navigation" className={`navigation-rail ${navigationOpen ? "navigation-open" : ""}`}>
           <div className="rail-workspace-label">NovaCore Industries</div>
           <nav className="primary-navigation" aria-label="Workspace">
-            {navigation.map(({ label, icon }, index) => (<div key={label}>
-              {[0, 2, 4].includes(index) && <div className="nav-group-label">{index === 0 ? "Workspace" : index === 2 ? "Knowledge" : "Assurance"}</div>}
-              <Link className={`navigation-item ${view === label ? "navigation-item-active" : ""}`} href={viewRoutes[label]} key={label} aria-current={view === label ? "page" : undefined} onClick={() => { setError(null); setNavigationOpen(false); }}>
+            {navigation.map(({ label, icon }) => (<div key={label}>
+              {["Dashboard", "Sources", "Security"].includes(label) && <div className="nav-group-label">{label === "Dashboard" ? "Workspace" : label === "Sources" ? "Knowledge" : "Assurance"}</div>}
+              <Link className={`navigation-item ${label === "History" ? "navigation-item-child" : ""} ${view === label ? "navigation-item-active" : ""}`} href={viewRoutes[label]} key={label} aria-current={view === label ? "page" : undefined} onClick={() => { setError(null); setNavigationOpen(false); }}>
                 <Icon name={icon} size={19} /><span>{label === "Dashboard" ? "Overview" : label}</span>
               </Link></div>
             ))}
           </nav>
           <div className="rail-footer">
-          <p className="rail-security-note"><Icon name="lock" size={14} />Access follows the active demo context.</p>
             <details className="account-menu" open={accountOpen} onToggle={(event) => setAccountOpen((event.currentTarget as HTMLDetailsElement).open)}>
               <summary className="account-trigger" aria-label={`Account menu for ${userName}`}>
                 <span className="account-avatar">{userName.slice(0, 1).toUpperCase()}</span>
@@ -865,7 +869,6 @@ export default function Workspace({ identity, view, savedConversation }: { ident
                 {!workspace && error && <button type="button" className="text-button" onClick={() => void refreshWorkspace()}>Retry account access</button>}
                 <p className="account-current"><strong>Authenticated identity · {userName}</strong><span>{workspace?.identity.email ?? identity}</span><small>Active demo context · {role}</small></p>
                 {workspace?.demo_switch_available && <label className="field-label account-role-field">Switch demo role<select aria-label="Switch demo role" value={DEMO_ROLES.includes(role) ? role : "CEO"} disabled={pending || ingestion.file.pending || ingestion.structured.pending} onChange={(event) => void switchDemoUser(event.target.value)}>{DEMO_ROLES.map((demoRole) => <option key={demoRole}>{demoRole}</option>)}</select></label>}
-                <button className="account-action" type="button" onClick={() => setSelectedTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "Use dark theme" : "Use light theme"}</button>
                 <button className="account-action account-logout" type="button" onClick={() => void signOut()}>Log out</button>
               </div>
             </details>
@@ -877,7 +880,6 @@ export default function Workspace({ identity, view, savedConversation }: { ident
             <AskView
               identity={userName}
               availableSources={workspace?.documents ?? []}
-              role={role}
               query={query}
               setQuery={setQuery}
               askedQuery={askedQuery}
@@ -892,19 +894,13 @@ export default function Workspace({ identity, view, savedConversation }: { ident
               stage={stage}
               onTrace={() => setTraceOpen(true)}
               onNew={newConversation}
-              onHistory={() => { setHistoryOpen((value) => !value); void loadHistory(); }}
-              onReloadHistory={() => void loadHistory()}
-              historyOpen={historyOpen}
-              conversations={conversations}
-              historyError={historyError}
-              historyLoading={historyLoading}
+              historyError={savedConversation ? historyError : null}
+              onRetryHistory={() => { if (savedConversation) void reopenConversation(savedConversation); }}
               retryEvidence={retryEvidence}
-              onReopen={reopenConversation}
-              onRemove={removeConversation}
               onSource={openSource}
             />
           ) : view === "History" ? (
-            <HistoryView role={role} conversations={conversations} loading={historyLoading || !activeRole} error={historyError || error} onRetry={() => { void refreshWorkspace(); void loadHistory(); }} />
+            <HistoryView onRemove={removeConversation} role={role} conversations={conversations} loading={historyLoading || !activeRole} error={historyError || error} onRetry={() => { void refreshWorkspace(); void loadHistory(); }} />
           ) : view === "Dashboard" ? (
             <DashboardView data={workspace} error={error} onRefresh={() => void refreshWorkspace()} onNavigate={selectView} onOpen={(source, trigger) => void openDocument(source, trigger)} />
           ) : view === "Sources" ? (
@@ -935,7 +931,7 @@ export default function Workspace({ identity, view, savedConversation }: { ident
         </section>
       </div>
 
-      {navigationOpen && <button type="button" className="mobile-scrim nav-scrim" aria-label="Close navigation" onClick={() => setNavigationOpen(false)} />}
+      {navigationOpen && <button type="button" className="mobile-scrim nav-scrim" tabIndex={-1} aria-label="Close navigation" onClick={() => setNavigationOpen(false)} />}
       {deleteTarget && <Drawer busy={pending} title="Delete source" description="Remove this source from the workspace" onClose={() => { if (!pending) setDeleteTarget(null); }}><div className="delete-confirm"><p>Delete <strong>{deleteTarget.source_name}</strong>?</p><p>This removes its searchable chunks, access grants and uploaded original. Saved conversations will no longer reveal its evidence. This cannot be undone.</p>{error && <p className="request-error" role="alert">{error}</p>}<div className="confirmation-actions"><button type="button" className="quiet-button" disabled={pending} onClick={() => { setDeleteTarget(null); setError(null); }}>Cancel</button><button type="button" className="primary-action destructive-action" disabled={pending} onClick={() => void confirmDeleteSource()}>{pending ? "Deleting…" : "Delete source"}</button></div></div></Drawer>}
       {sourceOpen && activeSource && <Drawer variant="evidence" title="Source evidence" description="Authorized source inspection" onClose={closeSource}>
         {sourceError ? <p className="request-error" role="alert">This source is outside your current access scope or unavailable.</p> : <article className="drawer-source">
@@ -965,34 +961,45 @@ export default function Workspace({ identity, view, savedConversation }: { ident
   );
 }
 
-function SourceDetails({ citations, onSource, retry = false }: {citations: Citation[]; onSource: (citation: Citation, trigger: HTMLButtonElement) => void; retry?: boolean}) {
+function SourceDetails({ citations, onSource, retry = false, onTrace }: {citations: Citation[]; onSource: (citation: Citation, trigger: HTMLButtonElement) => void; retry?: boolean; onTrace?: () => void}) {
   const groups = groupCitations(citations);
   if (!groups.length) return null;
   const source = (group: {key: string; title: string; citations: Citation[]}) => <div className="citation-group" key={group.key}>
     <button className="text-button" type="button" onClick={(event) => onSource(group.citations[0], event.currentTarget)}>{group.title} · {formatLocation(group.citations[0].location)}</button>
     {group.citations.length > 1 && <details><summary>More passages</summary>{group.citations.slice(1).map((citation) => <button className="text-button" type="button" key={citationKey(citation)} onClick={(event) => onSource(citation, event.currentTarget)}>{formatLocation(citation.location)}</button>)}</details>}
   </div>;
-  return <details className={retry ? "retry-evidence" : "answer-source-details"}>
-    <summary>{retry ? "Retrieved source details" : "Cited source details"}</summary>
+  return <div className="answer-source-actions"><details className={retry ? "retry-evidence" : "answer-source-details"}>
+    <summary>{retry ? "Retrieved sources" : "Sources"} · {groups.length}</summary>
     {retry && <p>You can open a source while waiting to retry. Access is checked when you open it.</p>}
     <div className={retry ? "retry-source-list" : "answer-sources"} role="region" aria-label="Source details" tabIndex={0}>
       {groups.slice(0, 3).map(source)}
       {groups.length > 3 && <details><summary>More sources</summary>{groups.slice(3).map(source)}</details>}
     </div>
-  </details>;
+  </details>
+    <button className="text-button" type="button" onClick={(event) => onSource(groups[0].citations[0], event.currentTarget)}>View evidence <Icon name="arrow" size={13} /></button>
+    {onTrace && <button className="text-button" type="button" onClick={onTrace}>Retrieval trace</button>}
+  </div>;
 }
 
-function AskView({ onCancel, failureTitle, availableSources, identity, role, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource, turns, stage, onTrace, onNew, onHistory, onReloadHistory, historyOpen, conversations, historyError, historyLoading, retryEvidence, onReopen, onRemove }: {
-  failureTitle: string; availableSources: Source[]; identity: string; role: string; query: string; setQuery: (value: string) => void; askedQuery: string;
+function AskView({ onCancel, failureTitle, availableSources, identity, query, setQuery, askedQuery, result, pending, error, onSubmit, onRetry, onSource, turns, stage, onTrace, onNew, historyError, onRetryHistory, retryEvidence }: {
+  failureTitle: string; availableSources: Source[]; identity: string; query: string; setQuery: (value: string) => void; askedQuery: string;
   result: QueryResult | null; pending: boolean; error: string | null;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRetry: () => void; onCancel: () => void;
   onSource: (citation: Citation, trigger: HTMLElement) => void;
   turns: { query: string; response: QueryResult }[]; stage: string; onTrace: () => void; onNew: () => void;
-  onHistory: () => void; onReloadHistory: () => void; historyOpen: boolean; conversations: { id: string; title: string; updated_at: string }[];
-  historyLoading: boolean; retryEvidence: Citation[];
-  historyError: string | null; onReopen: (id: string) => void; onRemove: (id: string) => void;
+  historyError: string | null; onRetryHistory: () => void; retryEvidence: Citation[];
 }) {
-
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const input = composerRef.current;
+    if (!input) return;
+    const fit = () => { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 144)}px`; };
+    fit();
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => { if (input.clientWidth !== width) { width = input.clientWidth; fit(); } });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [query]);
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -1001,44 +1008,43 @@ function AskView({ onCancel, failureTitle, availableSources, identity, role, que
   const examples = starterQuestions(availableSources);
   const messages = turns.length ? turns : result ? [{ query: askedQuery, response: result }] : [];
   return <>
-    <div className="conversation-header"><div><h1>Ask your knowledge.</h1><p>A question. An answer. The evidence behind it.</p></div><div className="conversation-controls"><button className="quiet-button" type="button" disabled={pending} aria-expanded={historyOpen} onClick={onHistory}><Icon name="files" size={15} />History</button><button className="quiet-button" type="button" disabled={pending} onClick={onNew}>New conversation</button></div></div>
-    <div className="ask-context"><Icon name="lock" size={14} /><span>{role}</span><span>Accessible sources only</span></div>
-    <div className={`ask-layout ${historyOpen ? "with-history" : ""}`}>
-      {historyOpen && <aside className="conversation-history" aria-label="Conversation history"><div className="history-heading"><h2>Conversations</h2><button className="icon-button" type="button" aria-label="Close history" onClick={onHistory}><Icon name="close" size={16} /></button></div><p>In your current access context</p>{historyLoading ? <p role="status">Loading conversations…</p> : historyError ? <div role="status"><p>{historyError}</p><button className="text-button" type="button" disabled={pending || historyLoading} onClick={onReloadHistory}>Retry history</button></div> : conversations.length ? <ol>{conversations.map((entry) => <li key={entry.id}><button type="button" disabled={pending} onClick={() => onReopen(entry.id)}><strong>{entry.title}</strong><small>{formatTime(entry.updated_at)}</small></button><button className="history-remove" type="button" disabled={pending} aria-label={`Remove conversation ${entry.title}`} onClick={() => onRemove(entry.id)}><Icon name="close" size={14} /></button></li>)}</ol> : <p>No conversations saved yet.</p>}<Link className="text-button section-link" href="/history">Open history page</Link></aside>}
+    <div className="conversation-header"><div><h1>Ask your knowledge.</h1><p>A question. An answer. The evidence behind it.</p></div><div className="conversation-controls"><Link className="quiet-button" href="/history"><Icon name="chat" size={15} />History</Link><button className="quiet-button" type="button" disabled={pending} onClick={onNew}>New conversation</button></div></div>
+    <div className="ask-layout">
       <div className="ask-main"><div className="conversation-scroll" ref={scrollRef}>
       {messages.length ? <div className="message-thread" aria-live="polite">{messages.map((turn) => <div className="conversation-turn" key={turn.response.request_id}>
         <div className="question-bubble"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{turn.query}</p></div>
         {(turn.response.state === "SMALL_TALK" || turn.response.state === "CLARIFICATION_NEEDED") ? <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><p>{turn.response.message}</p></div></div> : ["INSUFFICIENT_EVIDENCE", "CITATION_VALIDATION_FAILED", "EVIDENCE_CONFLICT", "SOURCE_UNAVAILABLE"].includes(turn.response.state) ? <div className="preview-response"><div className="answer-avatar" aria-hidden="true"><Icon name="lock" size={15} /></div><div><p className="response-primary">{turn.response.state === "CITATION_VALIDATION_FAILED" ? (turn.response.trace.history_replay ? "Recorded validation failure" : "The response could not be validated") : turn.response.state === "EVIDENCE_CONFLICT" ? (turn.response.trace.history_replay ? "Recorded evidence conflict" : "The available evidence disagrees") : turn.response.state === "SOURCE_UNAVAILABLE" ? "Source unavailable in this context" : "Not enough information"}</p><p className="response-secondary">{turn.response.trace.history_replay && ["CITATION_VALIDATION_FAILED", "EVIDENCE_CONFLICT"].includes(turn.response.state) ? "This saved question did not produce a reliable answer. Ask again to check current sources." : turn.response.state === "CITATION_VALIDATION_FAILED" ? "I couldn’t check that answer against your sources. Retry the question or make it more specific." : turn.response.state === "EVIDENCE_CONFLICT" ? "I couldn’t give a reliable answer from the available evidence. Please specify the record and fact you want checked." : turn.response.state === "SOURCE_UNAVAILABLE" ? "This saved answer cannot be shown using your current source access. Ask again to search the sources available now." : insufficientMessage(turn.query)}</p>{turn.response.state === "CITATION_VALIDATION_FAILED" && turn.response.request_id === result?.request_id && <button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button>}</div></div> : <div className="answer-block"><div className="answer-avatar" aria-hidden="true">C</div><div className="answer-copy"><h2 className={`answer-label answer-state state-${turn.response.state.toLowerCase()}`}>{answerLabel(turn.response)}</h2>
         <div className={`answer-paragraph ${turn.response.trace.history_replay ? "" : "approved-answer"}`} aria-live="off">{turn.response.claims.map((claim, index) => <p className="cited-claim" style={{animationDelay: `${Math.min(index, 7) * 80}ms`}} key={index}>{claim.text} {claim.citations.map((citation, citationIndex) => <button className="inline-citation" key={`${citationKey(citation)}-${citationIndex}`} type="button" aria-label={`Open evidence ${citationNumber(turn.response.claims, citationKey(citation))}: ${citation.title ?? "Authorized source"}, ${formatLocation(citation.location)}`} onClick={(event) => onSource(citation, event.currentTarget)}>[{citationNumber(turn.response.claims, citationKey(citation))}]</button>)}{" "}</p>)}</div>
-        <SourceDetails citations={turn.response.claims.flatMap((claim) => claim.citations)} onSource={onSource} />
+        <SourceDetails citations={turn.response.claims.flatMap((claim) => claim.citations)} onSource={onSource} onTrace={turn.response.request_id === result?.request_id && !pending ? onTrace : undefined} />
         {turn.response.state === "VERIFIED_EVIDENCE" && <p className="response-secondary">{turn.response.trace.provider_failure ? (turn.response.trace.provider_failure.code === "provider_timeout" ? "The answer service timed out. " : "The answer service is temporarily unavailable. ") : ""}Answered directly from source facts, without AI wording.</p>}
-        <div className="answer-foot"><span className="grounded-state"><Icon name="lock" size={14} />Source checked</span><button className="text-button" type="button" onClick={(event) => { const citation = turn.response.claims[0]?.citations[0]; if (citation) onSource(citation, event.currentTarget); }}>View evidence</button></div>
+
         {turn.response.state === "PARTIALLY_CITATION_VALIDATED" && <p className="response-secondary">Some parts couldn’t be checked. Only supported information is shown.</p>}
         {turn.response.trace.history_saved === false && <p className="response-secondary">This answer could not be saved to history.</p>}
         </div></div>}
-      </div>)}</div> : !pending && !error && <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="search" size={26} /></div><h2>What would you like to know?</h2><p>Ask about a document, an invoice, or a business record.<br />Follow the citations back to the original.</p>{examples.length > 0 && <div className="question-examples" aria-label="Questions from accessible demo sources">{examples.map((example) => <button className="sample-question" type="button" key={example.question} onClick={() => { setQuery(example.question); document.getElementById("query-input")?.focus(); }}><span><small><Icon name={example.icon} size={14} />{example.label}</small>{example.question}</span><Icon name="arrow" size={17} /></button>)}</div>}</div>}
+      </div>)}</div> : !pending && !error && <div className="empty-conversation"><div className="empty-mark" aria-hidden="true"><Icon name="search" size={26} /></div><h2>What would you like to know?</h2><p>Ask about a document, invoice, or business record.</p>{examples.length > 0 && <div className="question-examples" aria-label="Questions from accessible demo sources">{examples.map((example) => <button className="sample-question" type="button" key={example.question} onClick={() => { setQuery(example.question); document.getElementById("query-input")?.focus(); }}><span><small><Icon name={example.icon} size={14} />{example.label}</small>{example.question}</span><Icon name="arrow" size={17} /></button>)}</div>}</div>}
       {(pending || error) && askedQuery && !result && <div className="question-bubble pending-question"><span className="message-avatar user-avatar" aria-hidden="true">{identity.slice(0, 1).toUpperCase()}</span><p>{askedQuery}</p></div>}
       {pending && <div className="query-progress current-progress" role="status" aria-live="polite"><span className="progress-dot" aria-hidden="true" /><span>{progressLabels[stage] ?? "Preparing the question"}</span><button className="text-button" type="button" onClick={onCancel}>Stop</button></div>}
       {error && <div className="request-error" role="alert"><strong className="error-title">{failureTitle}</strong><p>{error}</p><button className="text-button" type="button" disabled={pending} onClick={onRetry}>Retry question</button></div>}
+      {historyError && <div className="request-error" role="alert"><p>{historyError}</p><button className="text-button" type="button" disabled={pending} onClick={onRetryHistory}>Retry opening conversation</button><Link className="text-button" href="/history">Back to history</Link></div>}
       {error && <SourceDetails citations={retryEvidence} onSource={onSource} retry />}
-      {result && !pending && <button className="trace-control text-button" type="button" onClick={onTrace}>View retrieval trace <Icon name="arrow" size={14} /></button>}
+      {result && !pending && !result.claims.length && <button className="trace-control text-button" type="button" onClick={onTrace}>View retrieval trace <Icon name="arrow" size={14} /></button>}
       </div>
-      <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={2} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Working…" : "Ask"}</span></button></div></form><p className="composer-policy">Company answers use sources you can access. Open a citation to inspect the original.</p></div>
+      <div className="composer-wrap"><form className="composer" onSubmit={onSubmit}><label className="sr-only" htmlFor="query-input">Ask a question</label><textarea ref={composerRef} id="query-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about your company knowledge…" maxLength={2000} rows={1} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="composer-actions"><button className="send-button" type="submit" disabled={!query.trim() || pending}><Icon name="send" size={17} /><span>{pending ? "Working…" : "Ask"}</span></button></div></form><p className="composer-policy">Company answers use sources you can access. Open a citation to inspect the original.</p></div>
       </div>
     </div>
   </>;
 }
 
-function HistoryView({ role, conversations, loading, error, onRetry }: {
+function HistoryView({ role, conversations, loading, error, onRetry, onRemove }: {
   role: string; conversations: {id: string; title: string; updated_at: string}[];
-  loading: boolean; error: string | null; onRetry: () => void;
+  loading: boolean; error: string | null; onRetry: () => void; onRemove: (id: string) => void;
 }) {
   return <div className="data-page history-page">
     <PageHeading title="Conversation history." description="Return to a question. Its sources are checked again when you open it." action={<Link className="quiet-button" href="/ask">Ask a question <Icon name="arrow" size={16} /></Link>} />
     <div className="ask-context"><Icon name="lock" size={14} /><span>{role}</span><span>Your conversations in this access context</span></div>
     {error ? <div className="request-error" role="alert"><p>{error}</p><button className="text-button" type="button" onClick={onRetry}>Retry history</button></div>
       : loading ? <div className="current-progress" role="status"><span className="progress-dot" aria-hidden="true" />Loading your conversations…</div>
-      : conversations.length ? <ol className="history-page-list">{conversations.map((entry) => <li key={entry.id}><Link href={`/ask/${encodeURIComponent(entry.id)}`}><span><strong>{entry.title}</strong><small>Updated {formatTime(entry.updated_at)}</small></span><Icon name="arrow" size={18} /></Link></li>)}</ol>
+      : conversations.length ? <ol className="history-page-list">{conversations.map((entry) => <li key={entry.id}><Link href={`/ask/${encodeURIComponent(entry.id)}`}><span><strong>{entry.title}</strong><small>Updated {formatTime(entry.updated_at)}</small></span><Icon name="arrow" size={18} /></Link><button className="icon-button danger-text" type="button" aria-label={`Remove conversation ${entry.title}`} title="Remove conversation" onClick={() => onRemove(entry.id)}><Icon name="trash" size={17} /></button></li>)}</ol>
       : <div className="quiet-empty"><Icon name="chat" size={24} /><h2>No saved conversations yet.</h2><p>Your questions will appear here after an answer is saved in this context.</p><Link className="text-button" href="/ask">Start a conversation</Link></div>}
     <Link className="text-button section-link" href="/dashboard">Back to Overview</Link>
   </div>;
@@ -1052,7 +1058,7 @@ function DashboardView({ data, error, onRefresh, onNavigate, onOpen }: { data: W
     <dl className="metric-strip"><Metric label="Accessible sources" value={data.document_count} /><Metric label="Searchable passages" value={data.chunk_count} /><Metric label="Structured records" value={data.structured_record_count} /></dl>
     <div className="overview-grid"><section className="data-section"><SectionTitle title="Recently indexed" action={<button className="text-button" type="button" onClick={() => onNavigate("Sources")}>Browse library <Icon name="arrow" size={14} /></button>} />{data.documents.length ? <ol className="overview-source-list">{[...data.documents].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 5).map((source) => <li key={source.id}><button type="button" onClick={(event) => onOpen(source, event.currentTarget)}><span className={`source-symbol source-kind-${source.source_type}`}><Icon name={source.source_type === "structured" ? "table" : "files"} size={19} /></span><span className="source-name"><strong title={source.source_name}>{source.source_name}</strong><small>{sourceTypeLabel(source.source_type)} · {formatTime(source.created_at)}</small></span><Icon name="arrow" size={16} /></button></li>)}</ol> : <p className="empty-note">No sources in this access context yet.</p>}<button className="text-button section-link" type="button" onClick={() => onNavigate("Ingest")}>Add a source</button></section>
     <section className="data-section"><SectionTitle title="Recent questions" action={<Link className="text-button" href="/history">View conversation history <Icon name="arrow" size={14} /></Link>} />{data.recent_queries.length ? <ol className="recent-query-list bounded-list">{data.recent_queries.slice(0, 5).map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.query}</span><small>{item.state.replaceAll("_", " ").toLowerCase()} · {formatTime(item.created_at)}</small></li>)}</ol> : <div className="quiet-empty"><Icon name="chat" size={22} /><p>Your next question starts here.</p><small>Saved questions will appear in this context.</small></div>}</section></div>
-    <details className="workspace-details"><summary>Workspace connections &amp; access activity</summary><div className="dashboard-columns"><section><SectionTitle title="Connections" /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Latest evaluation" value={data.latest_evaluation_status} /></div></section><section><SectionTitle title="Recorded access activity" action={<button className="text-button" type="button" onClick={() => onNavigate("Security")}>Inspect security</button>} />{data.security_activity?.length ? <ol className="recent-query-list bounded-list">{data.security_activity.map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.kind.replaceAll("_", " ")} · {item.outcome.replaceAll("_", " ")}</span><small>{formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No recorded access events.</p>}</section></div></details>
+    <section className="workspace-details" aria-labelledby="connections-heading"><h2 id="connections-heading">Workspace connections &amp; access activity</h2><div className="dashboard-columns"><section><SectionTitle title="Connections" /><div className="connection-list"><StatusRow label="API" value={data.api} /><StatusRow label="Supabase" value={data.supabase} /><StatusRow label="Gemini" value={data.gemini} /><StatusRow label="Ingestion" value={data.ingestion} /><StatusRow label="Latest evaluation" value={data.latest_evaluation_status} /></div></section><section><SectionTitle title="Recorded access activity" action={<button className="text-button" type="button" onClick={() => onNavigate("Security")}>Inspect security</button>} />{data.security_activity?.length ? <ol className="recent-query-list bounded-list">{data.security_activity.map((item, index) => <li key={`${item.created_at}-${index}`}><span>{item.kind.replaceAll("_", " ")} · {item.outcome.replaceAll("_", " ")}</span><small>{formatTime(item.created_at)}</small></li>)}</ol> : <p className="empty-note">No recorded access events.</p>}</section></div></section>
     <p className="trace-disclaimer">Local synthetic workspace. Provider configuration does not establish availability; it is checked when requested.</p>
   </div>;
 }
@@ -1068,8 +1074,8 @@ function SourcesView({ sources, canDelete, onDelete, notice, filter, onFilter, t
   return <div className="data-page"><PageHeading title="The source library." description="Original documents, scanned evidence, and structured records. Within your access." action={<button className="quiet-button" type="button" onClick={onRefresh}>Refresh</button>} />
     {error && <p className="request-error" role="alert">{error}</p>}
     {notice && <p role="status" className="source-notice">{notice}</p>}
-    <div className="sources-toolbar"><div className="sources-filters"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Search authorized names or IDs" /></label><label className="source-type-filter"><span className="sr-only">Filter by source type</span><select value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}><option value="all">All types</option><option value="pdf">PDF</option><option value="image_ocr">Image / OCR</option><option value="structured">Structured record</option></select></label><label className="source-type-filter"><span className="sr-only">Sort sources</span><select aria-label="Sort sources" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">Newest first</option><option value="oldest">Oldest first</option><option value="name">Source name</option></select></label></div><p className="list-count">{sources.length} {filter || typeFilter !== "all" ? "matching" : "accessible"} {sources.length === 1 ? "source" : "sources"}</p></div>
-    {sources.length ? <div className="source-table-wrap source-list-scroll" role="region" aria-label="Authorized sources" tabIndex={0}><table className="source-table knowledge-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Passages</th><th><span className="sr-only">Source actions</span></th></tr></thead><tbody>{orderedSources.map((source) => <tr key={source.id}><td><div className="source-cell"><span className={`source-symbol source-kind-${source.source_type}`}><Icon name={source.source_type === "structured" ? "table" : "files"} size={18} /></span><div><strong className="source-name-label" title={source.source_name}>{source.source_name}</strong><small>{typeof source.metadata.table === "string" ? source.metadata.table : "Protected source"} · <span title={source.id}>{source.id.slice(0, 8)}</span></small><details className="source-metadata"><summary>Source details</summary><p>{source.source_name}</p><p>ID: {source.id}</p><p>Added {formatTime(source.created_at)} · {typeof source.metadata.chunk_count === "number" ? `${source.metadata.chunk_count} passages` : "Passage count unavailable"}</p></details></div></div></td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><div className="source-actions"><button className="text-button" type="button" aria-label={`Open ${source.source_name}`} onClick={(event) => onOpen(source, event.currentTarget)}>Open</button>{canDelete && <button className="text-button danger-text" type="button" aria-label={`Delete ${source.source_name}`} disabled={pending} onClick={(event) => { event.currentTarget.focus(); onDelete(source); }}>Delete</button>}</div></td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter || typeFilter !== "all" ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter || typeFilter !== "all" ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
+    <div className="sources-toolbar"><div className="sources-filters"><label className="source-search"><Icon name="search" size={16} /><span className="sr-only">Filter authorized sources</span><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Search authorized names or IDs" /></label><label className="source-type-filter"><Icon name="files" size={16} /><span className="sr-only">Filter by source type</span><select value={typeFilter} onChange={(event) => onTypeFilter(event.target.value)}><option value="all">All types</option><option value="pdf">PDF</option><option value="image_ocr">Image / OCR</option><option value="structured">Structured record</option></select><Icon name="chevron" size={16} /></label><label className="source-type-filter"><Icon name="chart" size={16} /><span className="sr-only">Sort sources</span><select aria-label="Sort sources" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">Newest first</option><option value="oldest">Oldest first</option><option value="name">Source name</option></select><Icon name="chevron" size={16} /></label></div><p className="list-count">{sources.length} {filter || typeFilter !== "all" ? "matching" : "accessible"} {sources.length === 1 ? "source" : "sources"}</p></div>
+    {sources.length ? <div className="source-table-wrap source-list-scroll" role="region" aria-label="Authorized sources" tabIndex={0}><table className="source-table knowledge-table"><thead><tr><th>Source</th><th>Type</th><th>Added</th><th>Passages</th><th>Actions</th></tr></thead><tbody>{orderedSources.map((source) => <tr key={source.id}><td><div className="source-cell"><span className={`source-symbol source-kind-${source.source_type}`}><Icon name={source.source_type === "structured" ? "table" : "files"} size={18} /></span><div><strong className="source-name-label" title={source.source_name}>{source.source_name}</strong><small>{typeof source.metadata.table === "string" ? source.metadata.table : "Protected source"} · <span title={source.id}>{source.id.slice(0, 8)}</span></small><details className="source-metadata"><summary>Source details</summary><p>{source.source_name}</p><p>ID: {source.id}</p><p>Added {formatTime(source.created_at)} · {typeof source.metadata.chunk_count === "number" ? `${source.metadata.chunk_count} passages` : "Passage count unavailable"}</p></details></div></div></td><td><span className={`source-kind source-kind-${source.source_type}`}>{sourceTypeLabel(source.source_type)}</span></td><td>{formatTime(source.created_at)}</td><td>{typeof source.metadata.chunk_count === "number" ? source.metadata.chunk_count : "—"}</td><td><div className="source-actions"><button className="text-button" type="button" aria-label={`Open ${source.source_name}`} onClick={(event) => onOpen(source, event.currentTarget)}>Open</button>{canDelete && <button className="icon-button danger-text" type="button" title={`Delete ${source.source_name}`} aria-label={`Delete ${source.source_name}`} disabled={pending} onClick={(event) => { event.currentTarget.focus(); onDelete(source); }}><Icon name="trash" size={17} /></button>}</div></td></tr>)}</tbody></table></div> : <div className="empty-state"><Icon name="files" size={22} /><h2>{filter || typeFilter !== "all" ? "No matching sources" : "No authorized sources yet"}</h2><p>{filter || typeFilter !== "all" ? "Try a different name, type, or source ID." : "Sources added for your role will appear here after ingestion."}</p></div>}
   </div>;
 }
 
@@ -1096,7 +1102,7 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
     {!available && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>The local ingestion service is unavailable. Confirm the local API and Supabase are running.</span></div>}
     {available && role !== "CEO" && role !== "Loading" && <div className="inline-notice" role="status"><Icon name="lock" size={17} /><span>Ingestion is restricted to the CEO demo account. Your current role remains read-only.</span></div>}
     {error && <p className="request-error" role="alert">{error}</p>}
-    <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div><IngestionFeedback status={fileStatus} /><div className="ingest-path"><span>Original file</span><Icon name="arrow" size={14} /><span>Text / OCR</span><Icon name="arrow" size={14} /><span>Index</span></div>
+    <div className="ingest-columns"><form className="ingest-form" onSubmit={onUpload}><div className="form-title"><Icon name="upload" size={18} /><div><h2>Document or image</h2><p>PDF, PNG, or JPEG · up to 25 MB</p></div></div><IngestionFeedback status={fileStatus} />
       <label className="file-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (canIngest && !fileStatus.pending) chooseFile(event.dataTransfer.files[0] ?? null); }}><input type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" disabled={!canIngest || fileStatus.pending} onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.currentTarget.value = ""; }} /><Icon name="files" size={20} /><strong>{file?.name ?? "Drop a file or choose a source"}</strong><span>{file ? `${sourceTypeLabel(file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "image_ocr")} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : "PDF text and scanned pages, or image OCR · max 25 MB"}</span></label>
       {file && <button className="text-button" type="button" disabled={fileStatus.pending} onClick={() => setFile(null)}>Remove selected file</button>}{fileError && <p className="request-error" role="alert">{fileError}</p>}
       <label className="field-label">Grant source to<select value={accessRole} disabled={!canIngest || fileStatus.pending} onChange={(event) => setAccessRole(event.target.value)}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
@@ -1106,7 +1112,7 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
     <form className="ingest-form" onSubmit={onStructured}><div className="form-title"><Icon name="table" size={18} /><div><h2>Structured record</h2><p>Save a relational row and index its authorized representation.</p></div></div><IngestionFeedback status={structuredStatus} />
       <div className="field-pair"><label className="field-label">Table<select value={structuredMeta.table} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ table: event.target.value })} required>{["invoices", "customers", "payments", "purchase_orders", "projects", "employees", "opportunities"].map((table) => <option key={table}>{table}</option>)}</select></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>
       <label className="field-label">Source name<input value={structuredMeta.sourceName} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ sourceName: event.target.value })} required /></label>
-      <SectionTitle title="Record fields" /><RecordFields json={structuredJson} onChange={setStructuredJson} disabled={!canIngest || structuredStatus.pending} /><details className="advanced-json"><summary>Advanced JSON editor</summary><label className="field-label">Record JSON<textarea className="json-input" value={structuredJson} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredJson(event.target.value)} spellCheck={false} aria-describedby="structured-json-help" /></label><small className="field-hint" id="structured-json-help">JSON object with scalar values: strings, numbers, booleans, or null. The business key must match the Row ID; the server validates the table and assigns ownership.</small></details>
+      <SectionTitle title="Record fields" /><RecordFields json={structuredJson} onChange={setStructuredJson} disabled={!canIngest || structuredStatus.pending} />
       <label className="field-label">Grant source to<select value={structuredMeta.accessRole} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ accessRole: event.target.value })}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>
       <button className="primary-action" type="submit" disabled={!canIngest || structuredStatus.pending}>{structuredStatus.pending ? "Indexing record…" : "Index structured record"}</button>
     </form></div>

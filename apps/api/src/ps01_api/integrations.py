@@ -14,6 +14,9 @@ from .config import Settings
 from .rag import GENERATION_POLICY
 
 GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
+MAX_GENERATION_SECONDS = 12.0
+MAX_GENERATION_ATTEMPTS = 2
+GENERATION_ATTEMPT_SECONDS = 8.0
 
 
 class IntegrationFailure(Exception):
@@ -376,17 +379,20 @@ def model_scoped_quota(response):
         return False
 
 
-async def _generation_backoff(attempts):
+async def _generation_backoff(failure):
     # Share one retry schedule across models and projects. The enclosing total
-    # budget also bounds these waits; never retry the same cooled-down target.
-    sent = sum(attempt.get("attempted") is True for attempt in attempts)
-    await asyncio.sleep(min(4.0, 2.0 ** max(0, sent - 1)))
+    # budget also bounds this wait; never retry the same cooled-down target.
+    # Do not spend the interactive budget waiting out a long RetryInfo. Return
+    # the truthful fallback and let the existing circuit enforce the cooldown.
+    if failure.retry_after and failure.retry_after > 1:
+        raise failure
+    await asyncio.sleep(1.0)
 
 
 async def generate_claims(client, settings, prompt, before_attempt=None, attempt_observer=None):
     attempts = []
     try:
-        async with asyncio.timeout(settings.generation_budget_seconds):
+        async with asyncio.timeout(min(settings.generation_budget_seconds, MAX_GENERATION_SECONDS)):
             projects = provider_projects(settings)
             last_failure = None
             for project_index, project in enumerate(projects):
@@ -400,7 +406,7 @@ async def generate_claims(client, settings, prompt, before_attempt=None, attempt
                         before_attempt,
                         attempts,
                         attempt_observer,
-                        request_timeout=10.0 if len(projects) > 1 else 20.0,
+                        request_timeout=GENERATION_ATTEMPT_SECONDS,
                     )
                     output["_fallback_used"] |= project is not settings
                     return output
@@ -408,8 +414,10 @@ async def generate_claims(client, settings, prompt, before_attempt=None, attempt
                     if not redundancy_eligible(exc):
                         raise
                     last_failure = exc
+                    if sum(a.get("attempted") is True for a in attempts) >= MAX_GENERATION_ATTEMPTS:
+                        raise
                     if project_index + 1 < len(projects):
-                        await _generation_backoff(attempts)
+                        await _generation_backoff(exc)
             raise last_failure or IntegrationFailure(
                 "No eligible project", code="provider_unavailable"
             )
@@ -463,6 +471,10 @@ async def _generate_bounded(
     }
     last_failure = None
     for index, model in enumerate(models):
+        if sum(a.get("attempted") is True for a in attempts) >= MAX_GENERATION_ATTEMPTS:
+            raise last_failure or IntegrationFailure(
+                "Generation attempt limit reached", code="provider_unavailable"
+            )
         circuit = _circuit(settings, model)
         if failure := _blocked(circuit):
             if not redundancy_eligible(failure):
@@ -515,19 +527,25 @@ async def _generate_bounded(
         try:
             started = time.perf_counter()
             try:
-                response = await client.post(
-                    f"{GEMINI_API_ROOT}/models/{model}:generateContent",
-                    headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
-                    json=payload,
-                    timeout=httpx.Timeout(request_timeout, connect=5.0),
-                )
+                # HTTPX timeouts bound individual network phases, not total
+                # elapsed time. Bound the entire send, including pool/connect.
+                async with asyncio.timeout(request_timeout):
+                    response = await client.post(
+                        f"{GEMINI_API_ROOT}/models/{model}:generateContent",
+                        headers={"x-goog-api-key": settings.gemini_api_key.get_secret_value()},
+                        json=payload,
+                        timeout=httpx.Timeout(request_timeout, connect=3.0),
+                    )
             except (httpx.TransportError, TimeoutError) as exc:
                 failure = _transport_failure(exc)
                 _cool_down(circuit, failure)
                 attempt["code"] = failure.code
                 last_failure = failure
-                if index + 1 < len(models):
-                    await _generation_backoff(attempts)
+                if (
+                    index + 1 < len(models)
+                    and sum(a.get("attempted") is True for a in attempts) < MAX_GENERATION_ATTEMPTS
+                ):
+                    await _generation_backoff(failure)
                     continue
                 raise failure from exc
             except asyncio.CancelledError:
@@ -551,10 +569,14 @@ async def _generate_bounded(
                 if response.status_code == 429 and not model_scoped_quota(response):
                     _cool_down(shared, failure)
                 last_failure = failure
-                if retryable and index + 1 < len(models):
-                    # A different model is a different quota bucket; never retry this
-                    # exhausted model before its RetryInfo interval has elapsed.
-                    await _generation_backoff(attempts)
+                if (
+                    retryable
+                    and index + 1 < len(models)
+                    and sum(a.get("attempted") is True for a in attempts) < MAX_GENERATION_ATTEMPTS
+                ):
+                    # Retry guidance can end the request rather than extending
+                    # the interactive wait. The exhausted target stays cooled.
+                    await _generation_backoff(failure)
                     continue
                 raise failure
             try:

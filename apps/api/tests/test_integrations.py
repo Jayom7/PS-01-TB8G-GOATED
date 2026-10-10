@@ -254,7 +254,7 @@ async def test_model_scoped_quota_fallback_success_and_system_boundary():
                     "error": {
                         "details": [
                             {"violations": [{"quotaDimensions": {"model": "gemini-3.8-flash"}}]},
-                            {"retryDelay": "30s"},
+                            {"retryDelay": "1s"},
                         ]
                     }
                 },
@@ -295,7 +295,7 @@ async def test_all_model_quotas_exhausted_preserve_retry():
             await generate_claims(client, settings(), "Question")
     assert error.value.retry_after == 100
     assert error.value.code == "provider_rate_limited"
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 async def test_unsupported_inventory_never_generates():
@@ -598,7 +598,7 @@ def redundant_settings():
     )
 
 
-@pytest.mark.parametrize("failure_kind", ["timeout", "unavailable"])
+@pytest.mark.parametrize("failure_kind", ["timeout", "unavailable", "quota_then_unavailable"])
 async def test_generation_backoff_spans_projects_and_reauthorizes_each_send(
     monkeypatch, failure_kind
 ):
@@ -620,6 +620,8 @@ async def test_generation_backoff_spans_projects_and_reauthorizes_each_send(
         calls.append(json.loads(request.content)["contents"][0]["parts"][0]["text"])
         if failure_kind == "timeout":
             raise httpx.ReadTimeout("synthetic timeout", request=request)
+        if failure_kind == "quota_then_unavailable" and len(calls) == 1:
+            return httpx.Response(429)
         return httpx.Response(503)
 
     monkeypatch.setattr(integrations.asyncio, "sleep", sleep)
@@ -627,13 +629,13 @@ async def test_generation_backoff_spans_projects_and_reauthorizes_each_send(
         with pytest.raises(IntegrationFailure) as failure:
             await generate_claims(client, redundant_settings(), "old evidence", gate)
 
-    assert delays == [1.0, 2.0, 4.0]
-    assert gates == [0, 1, 2, 3]
-    assert calls == [f"authorized evidence {n}" for n in range(1, 5)]
+    assert delays == [1.0]
+    assert gates == [0, 1]
+    assert calls == [f"authorized evidence {n}" for n in range(1, 3)]
     assert failure.value.code == (
         "provider_timeout" if failure_kind == "timeout" else "provider_unavailable"
     )
-    assert len(failure.value.model_attempts) == 4
+    assert len(failure.value.model_attempts) == 2
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
@@ -677,6 +679,57 @@ async def test_generation_total_budget_includes_retry_backoff():
             await generate_claims(client, config, "Question")
     assert failure.value.code == "provider_timeout"
     assert len(calls) == 1
+    assert len(failure.value.model_attempts) == 1
+
+
+async def test_generation_wall_deadline_bounds_entire_send(monkeypatch):
+    import asyncio
+
+    from ps01_api import integrations
+    from ps01_api.integrations import IntegrationFailure
+
+    calls = []
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        calls.append(request)
+        await asyncio.sleep(1)
+        return httpx.Response(200, json={})
+
+    config = settings()
+    config.gemini_fallback_chat_model = ""
+    monkeypatch.setattr(integrations, "GENERATION_ATTEMPT_SECONDS", 0.02)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, config, "Question")
+    assert failure.value.code == "provider_timeout"
+    assert len(calls) == 1
+    assert failure.value.model_attempts[0]["code"] == "provider_timeout"
+
+
+async def test_generation_hard_ceiling_overrides_legacy_45_second_setting(monkeypatch):
+    import asyncio
+
+    from ps01_api import integrations
+    from ps01_api.integrations import IntegrationFailure
+
+    assert integrations.MAX_GENERATION_SECONDS == 12
+    assert integrations.MAX_GENERATION_ATTEMPTS == 2
+
+    async def handler(request):
+        if request.method == "GET":
+            return inventory()
+        await asyncio.sleep(1)
+        return httpx.Response(200, json={})
+
+    config = redundant_settings()
+    config.generation_budget_seconds = 45
+    monkeypatch.setattr(integrations, "MAX_GENERATION_SECONDS", 0.02)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(IntegrationFailure) as failure:
+            await generate_claims(client, config, "Question")
+    assert failure.value.code == "provider_timeout"
     assert len(failure.value.model_attempts) == 1
 
 

@@ -1556,8 +1556,11 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                             raise IntegrationFailure(
                                 "Evidence changed before generation", code="evidence_changed"
                             )
-                        sent_evidence_count = len(model_context)
-                        evidence_audit.canonical_ids = [row["evidence_id"] for row in model_context]
+                        sent = [
+                            row for row in model_context if relevant_passage(effective_query, row)
+                        ]
+                        sent_evidence_count = len(sent)
+                        evidence_audit.canonical_ids = [row["evidence_id"] for row in sent]
                         return new_prompt
 
                     try:

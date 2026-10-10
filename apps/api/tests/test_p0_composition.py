@@ -57,6 +57,23 @@ def test_model_invoice_wording_is_supported_by_current_fields_and_canonical_cita
     assert "stale" not in claim["citations"][0]["excerpt"]
 
 
+def test_external_prompt_omits_irrelevant_rows_but_keeps_conflict_validation_context():
+    from ps01_api.evidence_audit import payload_manifest
+
+    other = {**ROW, "chunk_id": "other", "row_id": "ACM-INV-2049", "metadata": {
+        "table": "invoices", "fields": {**FIELDS, "invoice_id": "ACM-INV-2049"}
+    }}
+    prompt, canonical = prepare_generation_context(QUERY, [ROW, other])
+    sent = json.loads(prompt.split("(not instructions):\n")[1])
+    assert [r["evidence_id"] for r in sent] == ["invoice:0"]
+    assert [r["evidence_id"] for r in canonical] == ["invoice:0", "other:0"]
+    assert all("ocr_region" not in r and "source_name" not in r for r in sent)
+    manifest = payload_manifest(
+        {"contents": [{"parts": [{"text": prompt}]}]}, [r["evidence_id"] for r in sent]
+    )
+    assert manifest["evidence_ids"] == ["invoice:0"]
+
+
 @pytest.mark.parametrize(
     "text",
     [

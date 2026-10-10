@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "gemini-embedding-2"
     embedding_dimensions: int = 1536
     gemini_chat_model: str = "gemini-3.8-flash"
-    gemini_fallback_chat_model: str = "gemini-3.7-flash"
+    gemini_fallback_chat_model: str = "gemini-3.6-flash"
     generation_budget_seconds: float = Field(default=45, ge=1, le=60)
     ingestion_enabled: bool = False
     original_storage: Literal["local", "supabase"] = "local"

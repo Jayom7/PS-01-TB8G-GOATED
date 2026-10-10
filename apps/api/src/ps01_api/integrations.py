@@ -493,7 +493,7 @@ async def _generate_bounded(
         # Gemini 3 Flash defaults to medium thinking. Low leaves room for the
         # bounded answer and its evidence IDs within the existing deadline.
         # Other model families keep their supported defaults.
-        if model in {"gemini-3.8-flash", "gemini-3.7-flash"}:
+        if model in {"gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"}:
             payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
         else:
             payload["generationConfig"].pop("thinkingConfig", None)

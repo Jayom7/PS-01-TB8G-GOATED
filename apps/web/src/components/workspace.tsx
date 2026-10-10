@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useReducer, useSyncExternalStore, type FormEvent } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { RecordFields } from "@/components/record-fields";
+import { RecordFields, recordTemplates } from "@/components/record-fields";
 import { Drawer } from "@/components/drawer";
 import { Icon, type IconName } from "@/components/icons";
 import { createClient } from "@/lib/supabase/client";
@@ -1110,7 +1110,11 @@ function IngestView({ role, available, error, accessRole, setAccessRole, file, s
       <p className="form-footnote">Original files remain private. Access is granted to the selected role and the CEO.</p>
     </form>
     <form className="ingest-form" onSubmit={onStructured}><div className="form-title"><Icon name="table" size={18} /><div><h2>Structured record</h2><p>Save a relational row and index its authorized representation.</p></div></div><IngestionFeedback status={structuredStatus} />
-      <div className="field-pair"><label className="field-label">Table<select value={structuredMeta.table} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ table: event.target.value })} required>{["invoices", "customers", "payments", "purchase_orders", "projects", "employees", "opportunities"].map((table) => <option key={table}>{table}</option>)}</select></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>
+      <div className="field-pair"><label className="field-label">Table<select value={structuredMeta.table} disabled={!canIngest || structuredStatus.pending} onChange={(event) => {
+        const table = event.target.value;
+        setStructuredMeta({ table, rowId: "", sourceName: "" });
+        setStructuredJson(JSON.stringify(recordTemplates[table], null, 2));
+      }} required>{Object.keys(recordTemplates).map((table) => <option key={table}>{table}</option>)}</select></label><label className="field-label">Row ID<input value={structuredMeta.rowId} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ rowId: event.target.value })} required /></label></div>
       <label className="field-label">Source name<input value={structuredMeta.sourceName} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ sourceName: event.target.value })} required /></label>
       <SectionTitle title="Record fields" /><RecordFields json={structuredJson} onChange={setStructuredJson} disabled={!canIngest || structuredStatus.pending} />
       <label className="field-label">Grant source to<select value={structuredMeta.accessRole} disabled={!canIngest || structuredStatus.pending} onChange={(event) => setStructuredMeta({ accessRole: event.target.value })}>{DEMO_ROLES.map((value) => <option key={value}>{value}</option>)}</select></label>

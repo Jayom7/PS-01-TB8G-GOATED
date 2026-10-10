@@ -75,13 +75,13 @@ async def test_generation_falls_back_after_transient_primary_model_outage() -> N
         )
 
     config = settings()
-    config.gemini_fallback_chat_model = "gemini-3.7-flash"
+    config.gemini_fallback_chat_model = "gemini-3.6-flash"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, config, "Return no claims.")
 
-    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash"]
+    assert calls == ["gemini-3.8-flash", "gemini-3.6-flash"]
     assert output["claims"] == []
-    assert output["_model"] == "gemini-3.7-flash"
+    assert output["_model"] == "gemini-3.6-flash"
     assert output["_fallback_used"] is True
     assert [attempt["provider_status"] for attempt in output["_attempts"]] == [503, 200]
     assert [attempt["code"] for attempt in output["_attempts"]] == [
@@ -109,8 +109,8 @@ async def test_generation_falls_back_when_primary_model_times_out() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, settings(), "Return no claims.")
 
-    assert calls == ["gemini-3.8-flash", "gemini-3.7-flash"]
-    assert output["_model"] == "gemini-3.7-flash"
+    assert calls == ["gemini-3.8-flash", "gemini-3.6-flash"]
+    assert output["_model"] == "gemini-3.6-flash"
     assert output["_fallback_used"] is True
 
 
@@ -124,7 +124,7 @@ async def test_generation_reports_provider_outage_after_trying_configured_fallba
         return httpx.Response(503)
 
     config = settings()
-    config.gemini_fallback_chat_model = "gemini-3.7-flash"
+    config.gemini_fallback_chat_model = "gemini-3.6-flash"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(IntegrationFailure) as failure:
             await generate_claims(client, config, "Generate a grounded answer.")
@@ -196,7 +196,7 @@ def inventory():
         json={
             "models": [
                 {"name": f"models/{m}", "supportedGenerationMethods": ["generateContent"]}
-                for m in ["gemini-3.8-flash", "gemini-3.7-flash"]
+                for m in ["gemini-3.8-flash", "gemini-3.6-flash"]
             ]
         },
     )
@@ -381,13 +381,13 @@ async def test_inventory_excluded_primary_reports_actual_fallback():
                 json={
                     "models": [
                         {
-                            "name": "models/gemini-3.7-flash",
+                            "name": "models/gemini-3.6-flash",
                             "supportedGenerationMethods": ["generateContent"],
                         }
                     ]
                 },
             )
-        assert "gemini-3.7-flash:generateContent" in str(request.url)
+        assert "gemini-3.6-flash:generateContent" in str(request.url)
         return httpx.Response(
             200, json={"candidates": [{"content": {"parts": [{"text": '{"claims":[]}'}]}}]}
         )
@@ -414,7 +414,7 @@ async def test_transient_status_uses_only_one_configured_fallback(status):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         output = await generate_claims(client, settings(), "Question")
     assert len(calls) == 2
-    assert output["_model"] == "gemini-3.7-flash"
+    assert output["_model"] == "gemini-3.6-flash"
     first = output["_attempts"][0]
     assert first["provider_status"] == status
     assert first["code"] == ("provider_timeout" if status in {408, 504} else "provider_unavailable")

@@ -178,7 +178,7 @@ Keep these checked-in defaults for the normal local demo:
 | Setting | Local default |
 | --- | --- |
 | `GEMINI_CHAT_MODEL` | `gemini-3.8-flash` |
-| `GEMINI_FALLBACK_CHAT_MODEL` | `gemini-3.7-flash` |
+| `GEMINI_FALLBACK_CHAT_MODEL` | `gemini-3.6-flash` |
 | `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-2` |
 | `EMBEDDING_DIMENSIONS` | `1536` |
 | `WEB_ORIGIN` | `http://localhost:3000` |

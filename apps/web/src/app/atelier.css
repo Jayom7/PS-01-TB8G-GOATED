@@ -114,7 +114,7 @@ summary { cursor: pointer; }
 .source-table td { padding-block: 17px; }
 .source-cell { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
 .source-cell > div { min-width: 0; flex: 1; }
-.source-table .source-name-label { max-width: min(40vw,520px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.source-table .source-name-label { max-width: min(40vw,520px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: text; -webkit-user-select: text; user-select: text; }
 .source-actions { display: flex; align-items: center; justify-content: flex-end; gap: 16px; }
 .source-actions .danger-text { margin-left: 0; color: var(--error); }
 .source-type-filter { position: relative; display: flex; align-items: center; min-width: 0; }

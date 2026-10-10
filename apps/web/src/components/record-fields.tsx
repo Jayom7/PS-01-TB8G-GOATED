@@ -1,5 +1,16 @@
 "use client";
 
+// Editable fields from the relational schema; identity and provenance stay server-owned.
+export const recordTemplates: Record<string, Record<string, unknown>> = {
+  invoices: { invoice_id: "", customer_id: "", customer: "", currency: "", total_minor_units: null, invoice_date: "", due_date: "", payment_status: "unpaid", status_as_of: "", contract_id: null },
+  customers: { customer_id: "", name: "", status: "", contract_id: null, payment_terms: null },
+  payments: { payment_id: "", invoice_id: "", customer_id: "", attempted_on: "", attempted_minor_units: null, settled_minor_units: null, status: "", receipt_id: null },
+  purchase_orders: { order_id: "", supplier_id: "", supplier: "", project_id: "", total_minor_units: null, currency: "", approved_on: "", status: "" },
+  projects: { project_id: "", name: "", release: null, status: "", owner_team: null },
+  employees: { employee_id: "", role: "", annual_salary_minor_units: null, currency: null, employment_status: "" },
+  opportunities: { opportunity_id: "", customer: "", stage: "", annual_value_minor_units: null, contract_id: null },
+};
+
 // Edit only keys already present in the record. The API owns the table schema.
 export function RecordFields({ json, onChange, disabled }: { json: string; onChange: (value: string) => void; disabled: boolean }) {
   let fields: Record<string, unknown>;

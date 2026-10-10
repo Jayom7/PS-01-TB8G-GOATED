@@ -109,7 +109,7 @@ button, a, summary { touch-action: manipulation; }
 button:disabled { cursor: not-allowed; }
 button, a, input, select, summary { transition: background-color var(--duration-fast) ease, border-color var(--duration-fast) ease, color var(--duration-fast) ease; }
 :where(button, select, textarea, input, a, summary):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
-::selection { color: var(--ink); background: var(--selected); }
+::selection { color: var(--on-accent); background: var(--accent); }
 input, textarea { caret-color: var(--accent); }
 ::placeholder { color: var(--faint); opacity: 1; }
 * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
@@ -652,3 +652,6 @@ svg { flex-shrink: 0; }
 .answer-copy .answer-paragraph { margin-bottom: var(--space-3); }
 .answer-source-details + .answer-foot { margin-top: var(--space-3); }
 .answer-copy > small { color: var(--muted); font-size: var(--type-caption); }
+
+/* Allow copying text throughout the workspace and authentication pages. */
+body, body * { -webkit-user-select: text; user-select: text; }

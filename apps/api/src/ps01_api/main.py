@@ -1600,7 +1600,11 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 await progress("validating_citations")
                 validation_started = time.perf_counter()
                 try:
-                    if provider_failure:
+                    if not model_context or not any(
+                        relevant_passage(effective_query, row) for row in model_context
+                    ):
+                        result = insufficient_evidence()
+                    elif provider_failure:
                         result = verified_evidence_response(effective_query, model_context)
                         if not result["claims"]:
                             # Keep the precise provider error when safe extraction
@@ -1668,16 +1672,30 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
 
     conversation_id = str(request.conversation_id or uuid4())
     await progress("validation_complete")
+    if not result["claims"]:
+        response_mode = "abstention"
+    elif provider_failure:
+        response_mode = "verified_evidence"
+    elif generation_model and any(
+        claim.get("composition") == "model" for claim in result["claims"]
+    ):
+        response_mode = (
+            "model_generated"
+            if all(claim.get("composition") == "model" for claim in result["claims"])
+            else "mixed"
+        )
+    else:
+        response_mode = "source_answer"
     response = QueryResponse(
         request_id=request_id,
         conversation_id=conversation_id,
         state=result["state"],
         message=(
             (
-                "Verified evidence response: composed from your sources without a "
-                "language model. Open citations to inspect the evidence."
+                "Answered directly from verified sources without AI wording. "
+                "The answer service is temporarily unavailable."
             )
-            if provider_failure
+            if provider_failure and result["state"] == "VERIFIED_EVIDENCE"
             else clarification
         ),
         claims=result["claims"],
@@ -1692,13 +1710,7 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
                 if provider_failure
                 else model_output.get("_attempts", [])
             ),
-            "response_mode": (
-                "verified_evidence"
-                if provider_failure
-                else "model_generated"
-                if result["claims"]
-                else "abstention"
-            ),
+            "response_mode": response_mode,
             "provider_failure": (
                 {
                     "code": provider_failure.code,
@@ -2182,7 +2194,7 @@ async def _recent_referents(client, settings, token, turns):
             "knowledge_chunks",
             params={
                 "id": f"in.({','.join(ids)})",
-                "select": "id,content,row_id,document_id",
+                "select": "id,content,row_id,document_id,source_type,source_id,source_name",
                 "limit": "24",
             },
         )
@@ -2202,7 +2214,7 @@ async def _recent_referents(client, settings, token, turns):
                 "knowledge_chunks",
                 params={
                     "document_id": f"in.({','.join(document_ids)})",
-                    "select": "id,content,row_id,document_id",
+                    "select": "id,content,row_id,document_id,source_type,source_id,source_name",
                     "limit": "100",
                 },
             )
@@ -2291,7 +2303,7 @@ async def conversation(
                         for c in claim.get("citations", [])
                         if isinstance(c, dict)
                     ]
-                }
+                } | ({"text": claim.get("text")} if claim.get("composition") == "model" else {})
                 for claim in claims
                 if isinstance(claim, dict) and isinstance(claim.get("citations"), list)
             ]
@@ -2352,6 +2364,13 @@ async def conversation(
                 replay_query, [{**item, "chunk_id": item["id"]} for item in current]
             )
             rebuilt = validate_generation({"claims": references}, canonical)
+            if (
+                saved.get("state") == "PARTIALLY_CITATION_VALIDATED"
+                and rebuilt["state"] == "CITATION_VALIDATED"
+            ):
+                # Rechecking the surviving claims cannot establish completeness
+                # of the original explanation after other claims were rejected.
+                rebuilt["state"] = "PARTIALLY_CITATION_VALIDATED"
             if references and not canonical:
                 rebuilt = {"state": "SOURCE_UNAVAILABLE", "claims": []}
             if saved.get("state") == "VERIFIED_EVIDENCE":
@@ -2361,8 +2380,8 @@ async def conversation(
                 if not canonical:
                     rebuilt = {"state": "SOURCE_UNAVAILABLE", "claims": []}
                 rebuilt["message"] = (
-                    "Verified evidence response: reconstructed without a language model. "
-                    "History replay did not rerun provider availability."
+                    "Answered directly from verified sources without AI wording. "
+                    "Source access was checked again for this saved answer."
                 )
             elif not claims and saved.get("state") in {
                 "CITATION_VALIDATION_FAILED", "EVIDENCE_CONFLICT"

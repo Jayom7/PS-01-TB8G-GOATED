@@ -3,7 +3,7 @@ export function chatErrorMessage(payload: { code?: string; status?: number } = {
   if (code === "session_expired" || status === 401 || payload.status === 401) return "Your session expired. Sign in again to continue.";
   if (code === "authorization_denied" || status === 403 || payload.status === 403) return "Your current access does not permit this action.";
   if (status === 404 || payload.status === 404) return "This conversation or source is no longer available to your account.";
-  if (code === "provider_timeout") return "The answer took too long to complete. Your access permissions remain in place. Please try again shortly.";
+  if (code === "provider_timeout") return "The answer took too long. Your question is still here; please try again shortly.";
   if (code === "provider_invalid_response") return "The response could not be validated. No answer was released. Please retry your question.";
   if (code === "provider_rate_limited" || code === "provider_unavailable") return "The answer service is temporarily unavailable. Your question is still here; try again when the service is ready.";
   if (code === "provider_safety_block") return "I couldn’t answer that request. Please try rephrasing your question.";
@@ -20,7 +20,14 @@ export function chatFailureTitle(payload: {code?: string; status?: number} = {})
   if (payload.code === "retrieval_unavailable") return "Authorized search unavailable";
   if (payload.code === "evidence_changed") return "Evidence changed";
   if (payload.code === "provider_safety_block") return "Rephrase this request";
-  return payload.code?.startsWith("provider_") ? "Generation unavailable" : "Answer unavailable";
+  return payload.code?.startsWith("provider_") ? "Couldn’t finish the answer" : "Answer unavailable";
+}
+
+export function answerLabel(response: {state: string; claims?: {composition?: string}[]; trace: {response_mode?: string; generation_model?: string | null; history_replay?: boolean}}) {
+  if (response.state === "VERIFIED_EVIDENCE") return "Verified source answer";
+  if (response.trace.history_replay) return "Source-backed answer";
+  if (response.trace.generation_model && response.trace.response_mode === "model_generated" && response.state === "CITATION_VALIDATED" && response.claims?.length && response.claims.every((claim) => claim.composition === "model")) return "AI-generated explanation";
+  return "Source-backed answer";
 }
 
 export function citationKey(citation: {citation_id: string; evidence_id?: string | null}) {
@@ -35,7 +42,8 @@ export function groupCitations<T extends { citation_id: string; evidence_id?: st
   const groups = new Map<string, { key: string; title: string; citations: T[] }>();
   for (const citation of citations) {
     // Never merge unrelated sources merely because their titles happen to match.
-    const key = citation.document_id || citation.citation_id;
+    const source = citation.document_id || citation.citation_id;
+    const key = citation.location.table && citation.location.row ? `${source}:${citation.location.table}:${citation.location.row}` : source;
     const group = groups.get(key) ?? { key, title: citation.title ?? "Authorized source", citations: [] };
     if (!group.citations.some((saved) => citationKey(saved) === citationKey(citation) && JSON.stringify(saved.location) === JSON.stringify(citation.location))) group.citations.push(citation);
     groups.set(key, group);

@@ -443,7 +443,14 @@ async def _generate_bounded(
                         "items": {
                             "type": "OBJECT",
                             "properties": {
-                                "evidence_ids": {"type": "ARRAY", "items": {"type": "STRING"}}
+                                "evidence_ids": {"type": "ARRAY", "items": {"type": "STRING"}},
+                                "text": {
+                                    "type": "STRING",
+                                    "description": (
+                                        "Optional source-faithful PDF/OCR explanation; "
+                                        "omit for structured facts."
+                                    ),
+                                },
                             },
                             "required": ["evidence_ids"],
                         },

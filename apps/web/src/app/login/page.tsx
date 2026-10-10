@@ -26,6 +26,7 @@ function LoginForm() {
       setConfigurationError(data.configuration_error === true);
     }).catch(() => { setGoogle(false); setGoogleUnavailable(true); });
   }, []);
+  /* Google sign-in is intentionally hidden on this login page.
   async function signInGoogle() {
     if (!google || busy) return;
     setBusy(true); setError(null);
@@ -34,6 +35,7 @@ function LoginForm() {
       if (error) {setError("Google sign-in could not start. Check the provider configuration or use email."); setBusy(false);}
     } catch (error) {setError(error instanceof SupabaseConfigurationError ? error.message : "Google sign-in is unavailable. Please use email or retry later."); setBusy(false);}
   }
+  */
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -75,9 +77,10 @@ function LoginForm() {
         <h1 id="login-title">Sign in to your workspace</h1>
         <p className="login-intro">Use your organization account to access authorized knowledge.</p>
         {notice && <p className="auth-message" role="status">{notice}</p>}
-        {google && <button className="oauth-button" type="button" disabled={busy} onClick={() => void signInGoogle()}>Continue with Google</button>}
-        {google === false && <p className="auth-configuration">{configurationError ? "Workspace sign-in is not configured. Contact your workspace administrator." : googleUnavailable ? "Sign-in service is unavailable. Check the Supabase service and connection, then reload this page." : "Google sign-in is not configured for this workspace. Use email and password."}</p>}
-        {google && <div className="auth-divider">or use email</div>}
+        {/* {google && <button className="oauth-button" type="button" disabled={busy} onClick={() => void signInGoogle()}>Continue with Google</button>} */}
+        {/* Google sign-in is not configured for this workspace. Use email and password. */}
+        {google === false && (configurationError || googleUnavailable) && <p className="auth-configuration">{configurationError ? "Workspace sign-in is not configured. Contact your workspace administrator." : "Sign-in service is unavailable. Check the Supabase service and connection, then reload this page."}</p>}
+        {/* {google && <div className="auth-divider">or use email</div>} */}
         <form className="login-form" onSubmit={signIn}>
           <label htmlFor="email">Email</label>
           <input

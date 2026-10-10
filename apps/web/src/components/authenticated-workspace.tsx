@@ -4,15 +4,15 @@ import { redirect } from "next/navigation";
 import Workspace, { type View } from "@/components/workspace";
 import { createClient } from "@/lib/supabase/server";
 
-export default function AuthenticatedWorkspace({ view }: { view: View }) {
+export default function AuthenticatedWorkspace({ view, savedConversation }: { view: View; savedConversation?: string }) {
   return (
     <Suspense fallback={<main className="auth-loading" aria-live="polite">Loading your workspace…</main>}>
-      <AuthenticatedContent view={view} />
+      <AuthenticatedContent view={view} savedConversation={savedConversation} />
     </Suspense>
   );
 }
 
-async function AuthenticatedContent({ view }: { view: View }) {
+async function AuthenticatedContent({ view, savedConversation }: { view: View; savedConversation?: string }) {
   await connection();
   const supabase = await createClient();
   const { data, error } = await supabase.auth.getClaims();
@@ -20,5 +20,5 @@ async function AuthenticatedContent({ view }: { view: View }) {
   if (error || typeof claims?.sub !== "string") redirect("/login");
 
   const email = typeof claims.email === "string" ? claims.email : "Authenticated user";
-  return <Workspace identity={email} view={view} />;
+  return <Workspace identity={email} view={view} savedConversation={savedConversation} />;
 }

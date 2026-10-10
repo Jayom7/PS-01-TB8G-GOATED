@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {answerLabel, chatErrorMessage, chatFailureTitle, citationKey, groupCitations, appendTurn} from '../src/lib/chat-state.ts';
+import {answerLabel, chatErrorMessage, chatFailureTitle, citationKey, groupCitations, appendTurn, insufficientMessage, parseSseFrames, progressLabels, waitForRequest} from '../src/lib/chat-state.ts';
 
 test('ordinary chat never renders upstream text, model IDs or long retry values', () => {
   for (const code of ['provider_rate_limited', 'provider_unavailable', 'provider_timeout', 'provider_invalid_response']) {
@@ -8,6 +8,27 @@ test('ordinary chat never renders upstream text, model IDs or long retry values'
     assert.doesNotMatch(text, /gemini|503|stack|768|46080|rate-limit/i);
     assert.match(text, /try again|retry/i);
   }
+});
+
+test('stage frames survive chunk boundaries and CRLF without exposing unknown deltas', () => {
+  const part = 'event: progress\r\ndata: {"stage":"validating_citations"}\r\n\r';
+  const first = parseSseFrames(part);
+  assert.equal(first.events.length, 0);
+  const last = parseSseFrames(first.remainder + '\nevent: delta\r\ndata: {"text":"unchecked"}\r\n\r\nevent: result\ndata: {"request_id":"one"}\n\n');
+  assert.deepEqual(last.events.map((event) => event.kind), ['progress', 'result']);
+  assert.equal(last.remainder, '');
+  assert.match(progressLabels[last.events[0].payload.stage], /Checking the answer/);
+});
+test('incomplete and malformed terminal frames never become answers', () => {
+  assert.equal(parseSseFrames('event: result\ndata: {"claims":').events.length, 0);
+  assert.throws(() => parseSseFrames('event: result\ndata: []\n\n'));
+  assert.throws(() => parseSseFrames('event: result\ndata: nope\n\n'));
+});
+test('stopped requests and missing revenue have truthful recovery copy', () => {
+  assert.match(chatErrorMessage({code: 'request_cancelled'}), /stopped.*question is still here/);
+  assert.match(insufficientMessage('What is Acme revenue?'), /revenue figure.*accessible sources/);
+  assert.doesNotMatch(insufficientMessage('What is Acme revenue?'), /unavailable|timed out|provider/);
+  assert.match(insufficientMessage('What is invoice XYZ total?'), /exact invoice ID/);
 });
 test('access failures, safety and retrieval remain distinct from availability', () => {
   assert.match(chatErrorMessage({status: 403}), /does not permit/);
@@ -61,4 +82,22 @@ test('separate passages in a PDF chunk keep distinct references', () => {
   const second = {...first, evidence_id: 'chunk:1'};
   assert.notEqual(citationKey(first), citationKey(second));
   assert.equal(groupCitations([first, second, first])[0].citations.length, 2);
+});
+
+
+test('Stop ends a stalled authentication wait and cannot release a late token', async () => {
+  const controller = new AbortController();
+  let finish;
+  const operation = new Promise((resolve) => { finish = resolve; });
+  const waiting = waitForRequest(operation, controller.signal);
+  controller.abort();
+  await assert.rejects(waiting, {name: 'AbortError'});
+  finish('late-token');
+  await assert.rejects(waiting, {name: 'AbortError'});
+  await assert.rejects(waitForRequest(Promise.reject(new Error('late failure')), controller.signal), {name: 'AbortError'});
+});
+test('request waits preserve successful authentication and real failures', async () => {
+  const signal = new AbortController().signal;
+  assert.equal(await waitForRequest(Promise.resolve('token'), signal), 'token');
+  await assert.rejects(waitForRequest(Promise.reject(new Error('network down')), signal), /network down/);
 });

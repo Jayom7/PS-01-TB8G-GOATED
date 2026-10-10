@@ -10,7 +10,58 @@ export function chatErrorMessage(payload: { code?: string; status?: number } = {
   if (["provider_authentication_failed", "provider_invalid_model", "provider_invalid_request"].includes(code)) return "The answer service needs attention. Please contact your workspace administrator.";
   if (code === "retrieval_unavailable") return "Authorized search could not complete. Please try again shortly.";
   if (code === "evidence_changed") return "Source access or content changed. Please ask again to use current evidence.";
+  if (code === "request_cancelled") return "The answer was stopped. Your question is still here if you want to try again.";
   return "I couldn’t complete that answer just now. Your access permissions remain in place. Please try again shortly.";
+}
+
+export const progressLabels: Record<string, string> = {
+  loading_history: "Rechecking saved sources", connecting: "Preparing your question",
+  checking_access: "Checking access", access_checked: "Access checked",
+  searching_knowledge: "Searching your accessible sources", retrieval_complete: "Search complete",
+  checking_references: "Checking source references", evidence_selected: "Evidence selected",
+  generating_response: "Preparing an answer from the evidence",
+  checking_final_access: "Rechecking source access", composing_verified_evidence: "Preparing a verified source answer",
+  validating_citations: "Checking the answer and citations", validation_complete: "Saving the checked answer",
+};
+
+export function insufficientMessage(query: string): string {
+  if (/\brevenue\b/i.test(query)) return "I couldn’t find a revenue figure in your accessible sources. Specify the reporting period or document you want checked. An invoice or order total alone does not establish revenue.";
+  if (/\binvoice\b/i.test(query)) return "I couldn’t find that invoice detail in your accessible sources. Check the exact invoice ID and specify the amount, date or payment status you need.";
+  return "I couldn’t find enough information in your accessible sources to answer that. Try a specific document, record ID or detail.";
+}
+
+export function parseSseFrames(buffer: string) {
+  const events: {kind: string; payload: Record<string, unknown>}[] = [];
+  const boundary = /\r?\n\r?\n/g;
+  let consumed = 0;
+  for (let match = boundary.exec(buffer); match; match = boundary.exec(buffer)) {
+    const frame = buffer.slice(consumed, match.index);
+    consumed = match.index + match[0].length;
+    const lines = frame.split(/\r?\n/);
+    const kind = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+    if (!kind || !["progress", "error", "result"].includes(kind)) continue;
+    const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+    if (!data) continue;
+    const payload = JSON.parse(data);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid answer stream.");
+    events.push({kind, payload});
+  }
+  return {events, remainder: buffer.slice(consumed)};
+}
+
+// A stalled session refresh must not make Stop wait for authentication. The
+// underlying auth refresh can finish, but this request cannot resume afterward.
+export function waitForRequest<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) { void operation.catch(() => {}); reject(signal.reason); return; }
+    signal.addEventListener("abort", abort, {once: true});
+    operation.then((value) => {
+      signal.removeEventListener("abort", abort); resolve(value);
+    }, (cause) => {
+      signal.removeEventListener("abort", abort); reject(cause);
+    });
+  });
 }
 
 export function chatFailureTitle(payload: {code?: string; status?: number} = {}) {

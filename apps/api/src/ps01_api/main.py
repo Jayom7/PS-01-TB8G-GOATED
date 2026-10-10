@@ -1692,8 +1692,8 @@ async def _run_query(request, authorization, demo_role, emit=None, verified=None
         state=result["state"],
         message=(
             (
-                "Answered directly from verified sources without AI wording. "
-                "The answer service is temporarily unavailable."
+                "I couldn’t reach the AI service, so I’ve provided the verified "
+                "information available directly from your source."
             )
             if provider_failure and result["state"] == "VERIFIED_EVIDENCE"
             else clarification

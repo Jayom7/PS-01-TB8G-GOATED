@@ -434,7 +434,7 @@ async def _generate_bounded(
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 2048,
             "responseSchema": {
                 "type": "OBJECT",
                 "properties": {
@@ -447,8 +447,9 @@ async def _generate_bounded(
                                 "text": {
                                     "type": "STRING",
                                     "description": (
-                                        "Optional source-faithful PDF/OCR explanation; "
-                                        "omit for structured facts."
+                                        "Grounded natural sentences using supplied "
+                                        "composition units "
+                                        "and approved paraphrases; canonical IDs are required."
                                     ),
                                 },
                             },
@@ -477,10 +478,9 @@ async def _generate_bounded(
                 }
             )
             continue
-        # Gemini 3 Flash defaults to medium thinking. This bounded selector
-        # resolves IDs rather than composing facts; low avoids spending the
-        # request deadline/token budget on unnecessary reasoning. Other model
-        # families keep their own supported defaults.
+        # Gemini 3 Flash defaults to medium thinking. Low leaves room for the
+        # bounded answer and its evidence IDs within the existing deadline.
+        # Other model families keep their supported defaults.
         if model in {"gemini-3.8-flash", "gemini-3.7-flash"}:
             payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
         else:
